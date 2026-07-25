@@ -7,6 +7,7 @@ enum CameraKitPlusFlashMode {
 enum CameraKitPlusCameraMode {
   back,
   front,
+
 }
 
 enum BarcodeType {

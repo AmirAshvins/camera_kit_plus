@@ -58,9 +58,10 @@ class _MyAppState extends State<MyApp> {
       initialRoute: "/",
       routes: <String, WidgetBuilder>{
         '/': (BuildContext context) => Home(),
-        '/settings': (BuildContext context) => Scaffold(appBar: AppBar(),),
+        '/settings': (BuildContext context) => Scaffold(
+              appBar: AppBar(),
+            ),
       },
-
     );
   }
 }
@@ -72,7 +73,6 @@ class Home extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-
     return Scaffold(
       backgroundColor: Colors.blueAccent,
       appBar: AppBar(
@@ -84,34 +84,44 @@ class Home extends StatelessWidget {
           children: [
             false
                 ? Expanded(
-                child: show
-                    ? CameraKitPlusView(
-                  controller: controller,
-                  showZoomSlider: true,
-                  onBarcodeRead: (String data) {
-                    // print(data);
-                    // log("Barcode Scanned =>$data");
-                  },
-                  onBarcodeDataRead: (BarcodeData data) {
-                    log("Barcode Scanned =>${data.getType} -- ${data.value}");
-                  },
-                )
-                    : SizedBox())
+                    child: show
+                        ? CameraKitPlusView(
+                            controller: controller,
+                            showZoomSlider: true,
+                            onBarcodeRead: (String data) {
+                              // print(data);
+                              // log("Barcode Scanned =>$data");
+                            },
+                            onBarcodeDataRead: (BarcodeData data) {
+                              log("Barcode Scanned =>${data.getType} -- ${data.value}");
+                            },
+                          )
+                        : SizedBox())
                 : Expanded(
-                child: CameraKitOcrPlusView(
-                  showFrame: true,
-                  showZoomSlider: true,
-                  onZoomChanged: (double zoom) {
-                    log("zoom is ${zoom}");
-                  },
-                  controller: controller,
-                  onTextRead: (OcrData data) {
-                    // log(data.text);
-                  },
-                )),
-            TextButton(onPressed: (){
-              Navigator.pushNamed(context, "/settings");
-            }, child: Text("Push"))
+                    child: Stack(
+                    children: [
+                      CameraKitOcrPlusView(
+                        showFrame: true,
+                        showZoomSlider: true,
+                        focusRequired: true,
+                        onZoomChanged: (double zoom) {
+                          log("zoom is ${zoom}");
+                        },
+                        controller: controller,
+                        onTextRead: (OcrData data) {
+                          log(data.text);
+                        },
+                      ),
+                    ],
+                  )),
+            TextButton(
+                onPressed: () {
+                  controller.takePicture().then((s) {
+                    log("$s");
+                  });
+                  // Navigator.pushNamed(context, "/settings");
+                },
+                child: Text("Push"))
 
             // Expanded(
             //   child: Container(
