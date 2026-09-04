@@ -174,12 +174,23 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
         widget.onTextRead?.call(data);
         break;
       case 'onZoomChanged':
-        if (methodCall.arguments is double) {
-          setState(() => zoom = methodCall.arguments as double);
-          widget.onZoomChanged?.call(methodCall.arguments as double);
+        final zoomArg = methodCall.arguments;
+        if (zoomArg is num) {
+          final z = zoomArg.toDouble();
+          setState(() => zoom = z);
+          widget.onZoomChanged?.call(z);
         }
         break;
       case 'onMacroChanged':
+        // Native may send a status map that includes zoom when macro toggles.
+        final args = methodCall.arguments;
+        if (args is Map) {
+          final z = args['zoomRatio'] ?? args['zoomFactor'];
+          if (z is num) {
+            setState(() => zoom = z.toDouble());
+            widget.onZoomChanged?.call(z.toDouble());
+          }
+        }
         break;
     }
   }

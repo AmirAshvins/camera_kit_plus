@@ -48,11 +48,25 @@ public class CameraKitPlusPlugin: NSObject, FlutterPlugin {
         }
       })
       DispatchQueue.main.async {
-        UIApplication.shared.windows.first?.rootViewController?.present(alert, animated: true)
+        Self.topViewController()?.present(alert, animated: true)
       }
       result(false)
     @unknown default:
       result(false)
     }
+  }
+
+  /// Finds a presentable root view controller without relying on deprecated `UIApplication.windows`.
+  private static func topViewController() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let window = scenes
+      .flatMap { $0.windows }
+      .first(where: { $0.isKeyWindow })
+      ?? scenes.first?.windows.first
+    var top = window?.rootViewController
+    while let presented = top?.presentedViewController {
+      top = presented
+    }
+    return top
   }
 }

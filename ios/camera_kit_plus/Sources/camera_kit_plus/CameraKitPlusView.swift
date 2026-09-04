@@ -134,6 +134,7 @@ class CameraKitPlusView: NSObject,
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         let args = call.arguments as? [String: Any]
         switch call.method {
+        // Prefer plugin-level getCameraPermission; view keeps redirect for older callers.
         case "getCameraPermission":
             self.requestCameraPermission(result: result)
 
@@ -472,7 +473,12 @@ class CameraKitPlusView: NSObject,
                 device.autoFocusRangeRestriction = isMacroEnabled ? .near : .none
             }
 
-            if device.isFocusModeSupported(.continuousAutoFocus) {
+            // When focusRequired is false, lock focus near infinity (matches Android AF_OFF).
+            if !focusRequired {
+                if device.isFocusModeSupported(.locked) {
+                    device.setFocusModeLocked(lensPosition: 0.0, completionHandler: nil)
+                }
+            } else if device.isFocusModeSupported(.continuousAutoFocus) {
                 device.focusMode = .continuousAutoFocus
             } else if device.isFocusModeSupported(.autoFocus) {
                 device.focusMode = .autoFocus
@@ -746,6 +752,8 @@ class CameraKitPlusView: NSObject,
     // MARK: - Dispose
     func dispose() {
         captureSession.stopRunning()
+        channel?.setMethodCallHandler(nil)
+        channel = nil
     }
 
     // MARK: - Type mapping

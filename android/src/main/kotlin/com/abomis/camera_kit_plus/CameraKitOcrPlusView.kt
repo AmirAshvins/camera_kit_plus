@@ -87,6 +87,13 @@ class CameraKitOcrPlusView(
     private var macroEnabled: Boolean = false
     private var macroSupported: Boolean? = null
 
+    /** Flutter platform channels require callbacks on the main thread. */
+    private fun invokeOnMain(method: String, arguments: Any?) {
+        ContextCompat.getMainExecutor(context).execute {
+            methodChannel.invokeMethod(method, arguments)
+        }
+    }
+
     init {
         linearLayout = FrameLayout(context)
         linearLayout.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
@@ -204,9 +211,9 @@ class CameraKitOcrPlusView(
 
         macroSupported = isMacroSupported(camera)
         camera?.cameraInfo?.zoomState?.observe(lifecycleOwner, Observer { state ->
-            state?.let { methodChannel.invokeMethod("onZoomChanged", it.zoomRatio) }
+            state?.let { invokeOnMain("onZoomChanged", it.zoomRatio.toDouble()) }
         })
-        methodChannel.invokeMethod("onMacroChanged", buildMacroStatus())
+        invokeOnMain("onMacroChanged", buildMacroStatus())
     }
 
     private fun setupCamera() {
@@ -288,7 +295,7 @@ class CameraKitOcrPlusView(
                     map["lines"] = lineModels
                     map["path"] = ""
                     map["orientation"] = rotation
-                    methodChannel.invokeMethod("onTextRead", Gson().toJson(map))
+                    invokeOnMain("onTextRead", Gson().toJson(map))
                 }
             }
             .addOnFailureListener { Log.e("Text", "Failed to recognize text", it) }
@@ -413,6 +420,8 @@ class CameraKitOcrPlusView(
                 result.success(true)
             }
             "setShowTextRectangles" -> {
+                // Stored for API parity with iOS; Android does not draw OCR
+                // bounding boxes yet (no-op for rendering).
                 showTextRectangles = call.argument<Boolean>("show") ?: false
                 result.success(true)
             }

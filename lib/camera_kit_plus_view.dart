@@ -181,11 +181,20 @@ class _CameraKitPlusViewState extends State<CameraKitPlusView>
         }
         break;
       case 'onZoomChanged':
-        if (methodCall.arguments is double) {
-          setState(() => zoom = methodCall.arguments as double);
+        final zoomArg = methodCall.arguments;
+        if (zoomArg is num) {
+          setState(() => zoom = zoomArg.toDouble());
         }
         break;
       case 'onMacroChanged':
+        // Native may send a status map that includes zoom when macro toggles.
+        final args = methodCall.arguments;
+        if (args is Map) {
+          final z = args['zoomRatio'] ?? args['zoomFactor'];
+          if (z is num) {
+            setState(() => zoom = z.toDouble());
+          }
+        }
         break;
     }
   }

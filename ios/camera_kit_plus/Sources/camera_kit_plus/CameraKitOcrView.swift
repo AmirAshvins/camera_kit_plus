@@ -170,25 +170,17 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         overlayLayer.frame = overlayView.bounds
     }
 
-    func createNativeView(view _view: UIView){
-        _view.backgroundColor = UIColor.blue
-        let nativeLabel = UILabel()
-        nativeLabel.text = "Native text from iOS"
-        nativeLabel.textColor = UIColor.white
-        nativeLabel.textAlignment = .center
-        nativeLabel.frame = CGRect(x: 0, y: 0, width: 180, height: 48.0)
-        _view.addSubview(nativeLabel)
+    func createNativeView(view _view: UIView) {
+        _view.backgroundColor = .black
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         let args = call.arguments
         let myArgs = args as? [String: Any]
         switch call.method {
+        // Plugin channel owns getCameraPermission; view-level retained as documented no-op redirect.
         case "getCameraPermission":
             self.getCameraPermission(flutterResult: result)
-
-        case "initCamera":
-            result(true)
 
         case "changeFlashMode":
             let mode = (myArgs?["flashModeID"] as? Int) ?? 0
@@ -199,6 +191,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             self.switchCamera(cameraID: cameraID, result: result)
 
         case "changeCameraVisibility":
+            // Legacy; prefer pauseCamera / resumeCamera.
             let visibility = (myArgs?["visibility"] as? Bool) ?? true
             self.changeCameraVisibility(visibility: visibility)
             result(true)
@@ -214,7 +207,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             self.takePicture(path:path,flutterResult: result)
 
         case "dispose":
-            self.stopCamera()
+            self.disposeNative()
             result(true)
 
         case "setZoom":
@@ -239,7 +232,6 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             self.forcedQuarterTurns = 0
             result(true)
 
-        // ===== New: Macro toggle from Flutter =====
         case "setMacro":
             let enabled = (myArgs?["enabled"] as? Bool) ?? false
             self.setMacro(enabled: enabled)
@@ -251,7 +243,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             result(true)
 
         default:
-            result(false)
+            result(FlutterMethodNotImplemented)
         }
     }
 
@@ -261,10 +253,18 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 AVCaptureDevice.requestAccess(for: .video, completionHandler: { (granted: Bool) in
-                    flutterResult(granted)
+                    DispatchQueue.main.async {
+                        flutterResult(granted)
+                    }
                 })
             }
         }
+    }
+
+    /// Stops capture and clears the per-view method channel handler.
+    private func disposeNative() {
+        stopCamera()
+        channel.setMethodCallHandler(nil)
     }
 
     func setupCamera(){
@@ -822,7 +822,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                 device.videoZoomFactor = clamped
             }
 
-            invokeOnMain("onZoomChanged", arguments: factor)
+            invokeOnMain("onZoomChanged", arguments: clamped)
 
             device.unlockForConfiguration()
             lastZoomFactor = clamped
@@ -924,37 +924,32 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         do {
             try device.lockForConfiguration()
 
-            // General AF settings
             if device.isSmoothAutoFocusSupported {
                 device.isSmoothAutoFocusEnabled = true
             }
             device.isSubjectAreaChangeMonitoringEnabled = true
 
-            // Set center focus point for stability (0..1 coordinates)
             if device.isFocusPointOfInterestSupported {
                 device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
             }
 
-            // Macro bias
             if isMacroEnabled, device.isAutoFocusRangeRestrictionSupported {
                 device.autoFocusRangeRestriction = .near
             } else if device.isAutoFocusRangeRestrictionSupported {
                 device.autoFocusRangeRestriction = .none
             }
 
-            // Use continuous AF, falling back to auto focus
-            if device.isFocusModeSupported(.continuousAutoFocus) {
+            // When focusRequired is false, lock focus near infinity (matches Android AF_OFF).
+            if !focusRequired {
+                if device.isFocusModeSupported(.locked) {
+                    device.setFocusModeLocked(lensPosition: 0.0, completionHandler: nil)
+                }
+            } else if device.isFocusModeSupported(.continuousAutoFocus) {
                 device.focusMode = .continuousAutoFocus
             } else if device.isFocusModeSupported(.autoFocus) {
                 device.focusMode = .autoFocus
             }
 
-            // (Optional) slight manual nudge toward near focus if supported
-            // Uncomment if you want a stronger macro bias:
-            // if isMacroEnabled, device.isFocusModeSupported(.locked) {
-            //     let near: Float = 0.85 // 0.0 = far, 1.0 = near (approx)
-            //     device.setFocusModeLocked(lensPosition: near) { _ in }
-            // }
             invokeOnMain("onMacroChanged", arguments: self.buildMacroStatus())
 
             device.unlockForConfiguration()
@@ -1018,11 +1013,11 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                     ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
                 ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)!
             } else {
-                // Normal: prefer virtual multi-cam so iOS can pick best lens for zoom range
-                return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
-                    ?? AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back)
-                ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back) // keep as-is if you had it
+                // Normal: match bestBackCamera() — triple → dual-wide → wide → ultra-wide last.
+                return AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back)
+                    ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
                     ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+                    ?? AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
             }
         }()
 
@@ -1212,9 +1207,8 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
             if !text.isEmpty {
                 self.onTextRead(text: text, values: lines, path: "", orientation: uiOrientation.rawValue)
-            } else {
-                self.onTextRead(text: "", values: [], path: "", orientation: nil)
             }
+            // Skip empty frames — avoid spamming Dart/ocr_mrz every sample buffer.
         }
     }
 

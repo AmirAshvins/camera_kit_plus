@@ -67,10 +67,6 @@ class CameraKitPlusView(
     private var preview: Preview? = null
     val REQUEST_CAMERA_PERMISSION = 1001
 
-    private val barcodeTimestamps = mutableMapOf<String, MutableList<Long>>()
-    private val detectionWindowMs = 200L
-    private val detectionThreshold = 4
-
     // ====== Zoom state / gestures ======
     private var scaleDetector: ScaleGestureDetector? = null
     private var tapDetector: android.view.GestureDetector? = null
@@ -81,6 +77,13 @@ class CameraKitPlusView(
 
     // Cache macro support for current camera (back/front).
     private var macroSupported: Boolean? = null
+
+    /** Flutter platform channels require callbacks on the main thread. */
+    private fun invokeOnMain(method: String, arguments: Any?) {
+        ContextCompat.getMainExecutor(context).execute {
+            methodChannel.invokeMethod(method, arguments)
+        }
+    }
 
     init {
         Log.d("CameraKitPlusView", "INIT")
@@ -203,9 +206,9 @@ class CameraKitPlusView(
 
         macroSupported = isMacroSupported(camera)
         camera?.cameraInfo?.zoomState?.observe(lifecycleOwner, Observer { state ->
-            state?.let { methodChannel.invokeMethod("onZoomChanged", it.zoomRatio) }
+            state?.let { invokeOnMain("onZoomChanged", it.zoomRatio.toDouble()) }
         })
-        methodChannel.invokeMethod("onMacroChanged", buildMacroStatus())
+        invokeOnMain("onMacroChanged", buildMacroStatus())
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
@@ -263,7 +266,7 @@ class CameraKitPlusView(
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes ->
                 barcodes.firstNotNullOfOrNull { it.rawValue }?.let {
-                    methodChannel.invokeMethod("onBarcodeScanned", it)
+                    invokeOnMain("onBarcodeScanned", it)
                 }
             }
             .addOnFailureListener { Log.e("Barcode", "Failed to scan barcode", it) }
