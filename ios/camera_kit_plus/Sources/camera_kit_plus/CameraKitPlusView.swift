@@ -65,6 +65,8 @@ class CameraKitPlusView: NSObject,
     private var lastEmitTs: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
 
     // MARK: - Config
+    private var focusRequired: Bool = true
+    private var viewId: Int64 = 0
     private var wantedAVTypes: [AVMetadataObject.ObjectType] = [
         .ean13, .qr, .pdf417, .interleaved2of5, .code128, .aztec, .code39, .code39Mod43,
         .code93, .dataMatrix, .ean8, .itf14
@@ -83,12 +85,23 @@ class CameraKitPlusView: NSObject,
     }()
 
     // MARK: - Lifecycle
-    init(frame: CGRect, messenger: FlutterBinaryMessenger) {
+    init(
+        frame: CGRect,
+        viewIdentifier viewId: Int64,
+        arguments args: Any?,
+        binaryMessenger messenger: FlutterBinaryMessenger
+    ) {
         let container = CameraContainerView(frame: frame)
         _view = container
         _view.backgroundColor = .black
+        self.viewId = viewId
         super.init()
-        
+
+        if let myArgs = args as? [String: Any],
+           let focus = myArgs["focusRequired"] as? Bool {
+            self.focusRequired = focus
+        }
+
         container.onLayoutSubviews = { [weak self] in
             self?.ensurePreviewLayer()
         }
@@ -96,7 +109,10 @@ class CameraKitPlusView: NSObject,
         setupAVCapture_bootstrapDevice()
         setupCamera()
 
-        channel = FlutterMethodChannel(name: "camera_kit_plus", binaryMessenger: messenger)
+        channel = FlutterMethodChannel(
+            name: "camera_kit_plus/view_\(viewId)",
+            binaryMessenger: messenger
+        )
         channel?.setMethodCallHandler(handle)
 
         _view.isUserInteractionEnabled = true
@@ -174,6 +190,7 @@ class CameraKitPlusView: NSObject,
             result(true)
 
         case "dispose":
+            self.dispose()
             result(true)
 
         default:
@@ -183,10 +200,19 @@ class CameraKitPlusView: NSObject,
 
     // MARK: - Permissions
     func requestCameraPermission(result: @escaping FlutterResult) {
-        if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
-            UIApplication.shared.open(settingsURL)
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
             result(true)
-        } else {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async { result(granted) }
+            }
+        case .denied, .restricted:
+            if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(settingsURL)
+            }
+            result(false)
+        @unknown default:
             result(false)
         }
     }

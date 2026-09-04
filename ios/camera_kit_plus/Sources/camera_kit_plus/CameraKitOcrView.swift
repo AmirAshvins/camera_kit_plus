@@ -4,9 +4,7 @@ import UIKit
 import Foundation
 import AVFoundation
 import AudioToolbox
-import MLKitTextRecognition
-import MLKitCommon
-import MLKitVision
+import Vision
 
 class CameraOcrViewContainer: UIView {
     var onLayoutSubviews: (() -> Void)?
@@ -38,7 +36,8 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera_kit_plus.ocr.sessionQueue") // Serial queue for session ops
     
-    var textRecognizer : TextRecognizer?
+    private var ocrReady = false
+    private var isProcessingOcr = false
     var flutterResultTakePicture:FlutterResult!
     var flutterResultOcr:FlutterResult!
     var orientation : UIImage.Orientation!
@@ -53,7 +52,9 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     private var didChangeAudioSession = false
     // New optional feature toggle
     var showTextRectangles: Bool = false
-
+    /// When true, continuous AF / tap-to-focus is more aggressive.
+    var focusRequired: Bool = false
+    private var viewId: Int64 = 0
 
     /// 0:camera 1:barcodeScanner 2:ocrReader
     var usageMode:Int = 0
@@ -79,22 +80,27 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         binaryMessenger messenger: FlutterBinaryMessenger?
     ) {
         _view = UIView()
-        self.channel = FlutterMethodChannel(name:"artemis_camera_kit",binaryMessenger: messenger!)
         self.frame = frame
+        self.viewId = viewId
+        self.channel = FlutterMethodChannel(
+            name: "camera_kit_plus/view_\(viewId)",
+            binaryMessenger: messenger!
+        )
 
         super.init()
         self.flashMode = .off // default to safe value
         
-        // Parse showTextRectangles from arguments
-        if let myArgs = args as? [String: Any],
-           let showRects = myArgs["showTextRectangles"] as? Bool {
-            self.showTextRectangles = showRects
+        if let myArgs = args as? [String: Any] {
+            if let showRects = myArgs["showTextRectangles"] as? Bool {
+                self.showTextRectangles = showRects
+            }
+            if let focus = myArgs["focusRequired"] as? Bool {
+                self.focusRequired = focus
+            }
         }
 
-        self.channel.setMethodCallHandler(handle)
         createNativeView(view: _view)
         setupCamera()
-        channel = FlutterMethodChannel(name: "camera_kit_plus", binaryMessenger: messenger!)
         channel.setMethodCallHandler(handle)
         
         NotificationCenter.default.addObserver(self,
@@ -185,9 +191,12 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             result(true)
 
         case "changeFlashMode":
-            let mode = (myArgs?["flashModeID"] as? Int)!
+            let mode = (myArgs?["flashModeID"] as? Int) ?? 0
             changeFlashMode(modeID: mode, result: result)
-            result(true)
+
+        case "switchCamera":
+            let cameraID = (myArgs?["cameraID"] as? Int) ?? 0
+            self.switchCamera(cameraID: cameraID, result: result)
 
         case "changeCameraVisibility":
             let visibility = (myArgs?["visibility"] as? Bool) ?? true
@@ -201,10 +210,11 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             self.resumeCamera(); result(true)
 
         case "takePicture":
-            let path = (myArgs?["path"] as? String)!
+            let path = (myArgs?["path"] as? String) ?? ""
             self.takePicture(path:path,flutterResult: result)
 
         case "dispose":
+            self.stopCamera()
             result(true)
 
         case "setZoom":
@@ -262,7 +272,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         self.isFillScale = true
         self.cameraPosition = .back
         self.flashMode = .off
-        textRecognizer = TextRecognizer.textRecognizer()
+        ocrReady = true
         self.setupAVCapture()
     }
 
@@ -271,24 +281,53 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         self.usageMode = modeID
         self.isFillScale = fill
         self.cameraPosition = cameraID == 0 ? .back : .front
-        textRecognizer = TextRecognizer.textRecognizer()
+        ocrReady = true
         self.setupAVCapture()
     }
 
-    // Prefer virtual multi-camera when available (auto lens switching), else plain wide-angle
+    // Prefer wide / multi-camera for MRZ OCR; ultra-wide only as last resort (macro path switches separately).
     @available(iOS 13.0, *)
     private func bestBackCamera() -> AVCaptureDevice? {
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: [
-                .builtInUltraWideCamera,       // iPhone Pro models
-                .builtInTripleCamera,       // iPhone Pro models
-                .builtInDualWideCamera,     // many iPhones
-                .builtInWideAngleCamera     // fallback
+                .builtInTripleCamera,
+                .builtInDualWideCamera,
+                .builtInWideAngleCamera,
+                .builtInUltraWideCamera
             ],
             mediaType: .video,
             position: .back
         )
         return discovery.devices.first
+    }
+
+    /// Switches between front and back cameras while keeping the OCR session alive.
+    func switchCamera(cameraID: Int, result: @escaping FlutterResult) {
+        cameraPosition = cameraID == 0 ? .back : .front
+        sessionQueue.async {
+            self.session.beginConfiguration()
+            for input in self.session.inputs {
+                self.session.removeInput(input)
+            }
+            let device: AVCaptureDevice?
+            if self.cameraPosition == .back {
+                device = self.bestBackCamera()
+            } else {
+                device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+            }
+            guard let captureDevice = device,
+                  let deviceInput = try? AVCaptureDeviceInput(device: captureDevice) else {
+                self.session.commitConfiguration()
+                DispatchQueue.main.async { result(false) }
+                return
+            }
+            self.captureDevice = captureDevice
+            if self.session.canAddInput(deviceInput) {
+                self.session.addInput(deviceInput)
+            }
+            self.session.commitConfiguration()
+            DispatchQueue.main.async { result(true) }
+        }
     }
 
     @available(iOS 13.0, *)
@@ -659,17 +698,22 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         tick()
     }
 
+    private func invokeOnMain(_ method: String, arguments: Any?) {
+        DispatchQueue.main.async { [weak self] in
+            self?.channel.invokeMethod(method, arguments: arguments)
+        }
+    }
+
     func onBarcodeRead(barcode: String) {
-        channel.invokeMethod("onBarcodeRead", arguments: barcode)
+        invokeOnMain("onBarcodeRead", arguments: barcode)
     }
 
     func onTextRead(text: String, values: [LineModel], path: String?, orientation: Int?) {
         let data = OcrData(text: text, path: path, orientation: orientation, lines: values)
-        let jsonEncoder = JSONEncoder()
         do {
-            let jsonData = try jsonEncoder.encode(data)
+            let jsonData = try JSONEncoder().encode(data)
             let json = String(data: jsonData, encoding: .utf8)
-            channel.invokeMethod("onTextRead", arguments: json)
+            invokeOnMain("onTextRead", arguments: json)
         } catch {
             print("JSON encode error: \(error)")
         }
@@ -688,56 +732,30 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     }
 
     // -------------------------
-    // Still image OCR
+    // Still image OCR (Apple Vision, accurate)
     // -------------------------
     func processImageFromPath(path:String,flutterResult:  @escaping FlutterResult){
         let fileURL = URL(fileURLWithPath: path)
         do {
             self.flutterResultOcr = flutterResult
             let imageData = try Data(contentsOf: fileURL)
-            let image = UIImage(data: imageData)
-            if image == nil { return }
-            let visionImage = VisionImage(image: image!)
-            visionImage.orientation = rotate(image!.imageOrientation, turns: forcedQuarterTurns)
-            processImage(visionImage: visionImage, selectedImagePath: path)
+            guard let image = UIImage(data: imageData), let cgImage = image.cgImage else { return }
+            let uiOrientation = rotate(image.imageOrientation, turns: forcedQuarterTurns)
+            let cgOrientation = Self.cgImageOrientation(from: uiOrientation)
+            recognizeText(
+                cgImage: cgImage,
+                orientation: cgOrientation,
+                recognitionLevel: .accurate,
+                bufferSize: CGSize(width: cgImage.width, height: cgImage.height)
+            ) { text, lines in
+                if text.isEmpty {
+                    self.textRead(text: "", values: [], path: path, orientation: nil)
+                } else {
+                    self.textRead(text: text, values: lines, path: path, orientation: uiOrientation.rawValue)
+                }
+            }
         } catch {
             print("Error loading image : \(error)")
-        }
-    }
-
-    func processImage(visionImage: VisionImage, image: UIImage? = nil, selectedImagePath : String? = nil) {
-        if textRecognizer != nil {
-            if let ui = image {
-                visionImage.orientation = rotate(ui.imageOrientation, turns: forcedQuarterTurns)
-            } else {
-                visionImage.orientation = rotate(visionImage.orientation, turns: forcedQuarterTurns)
-            }
-            let path : String? = selectedImagePath
-
-            textRecognizer?.process(visionImage) { result, error in
-                guard error == nil, let result = result else {
-                    self.textRead(text: "Error: " + error.debugDescription, values: [], path: "", orientation: nil)
-                    return
-                }
-
-                if !result.text.isEmpty {
-                    var listLineModel: [LineModel] = []
-                    for b in result.blocks {
-                        for l in b.lines{
-                            let lineModel : LineModel = LineModel()
-                            lineModel.text = l.text
-                            for c in l.cornerPoints {
-                                lineModel.cornerPoints.append(CornerPointModel(x: c.cgPointValue.x, y: c.cgPointValue.y))
-                            }
-                            listLineModel.append(lineModel)
-                        }
-                    }
-
-                    self.textRead(text: result.text, values: listLineModel, path: path, orientation:  visionImage.orientation.rawValue)
-                } else {
-                    self.textRead(text: "", values: [], path: path, orientation:  nil)
-                }
-            }
         }
     }
 
@@ -778,7 +796,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             do {
                 try device.lockForConfiguration()
                 device.ramp(toVideoZoomFactor: target, withRate: 8.0)
-                  channel.invokeMethod("onZoomChanged", arguments: target)
+                  invokeOnMain("onZoomChanged", arguments: target)
                 device.unlockForConfiguration()
             } catch {
                 print("Zoom end error: \(error)")
@@ -804,7 +822,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                 device.videoZoomFactor = clamped
             }
 
-            channel.invokeMethod("onZoomChanged", arguments: factor)
+            invokeOnMain("onZoomChanged", arguments: factor)
 
             device.unlockForConfiguration()
             lastZoomFactor = clamped
@@ -937,7 +955,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             //     let near: Float = 0.85 // 0.0 = far, 1.0 = near (approx)
             //     device.setFocusModeLocked(lensPosition: near) { _ in }
             // }
-            channel.invokeMethod("onMacroChanged", arguments: self.buildMacroStatus())
+            invokeOnMain("onMacroChanged", arguments: self.buildMacroStatus())
 
             device.unlockForConfiguration()
         } catch {
@@ -1156,47 +1174,34 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     public func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard let tr = textRecognizer else { return }
+        guard ocrReady, !isProcessingOcr else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // get image size from the frame
-        if let img = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            let w = CGFloat(CVPixelBufferGetWidth(img))
-            let h = CGFloat(CVPixelBufferGetHeight(img))
-            lastFrameImageSize = CGSize(width: w, height: h)
-        }
+        let bufferW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let bufferH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        let bufferSize = CGSize(width: bufferW, height: bufferH)
 
-        let visionImage = VisionImage(buffer: sampleBuffer)
         let base = imageOrientation(fromDevicePosition: cameraPosition)
-        visionImage.orientation = rotate(base, turns: forcedQuarterTurns)
+        let uiOrientation = rotate(base, turns: forcedQuarterTurns)
+        let cgOrientation = Self.cgImageOrientation(from: uiOrientation)
+        lastFrameImageSize = Self.orientedSize(for: bufferSize, orientation: cgOrientation)
 
-        do {
-            let result = try tr.results(in: visionImage)
-            let txt = result.text
+        isProcessingOcr = true
+        recognizeText(
+            pixelBuffer: pixelBuffer,
+            orientation: cgOrientation,
+            recognitionLevel: .accurate,
+            bufferSize: bufferSize
+        ) { [weak self] text, lines in
+            guard let self = self else { return }
+            self.isProcessingOcr = false
 
-            var listLineModel: [LineModel] = []
-            if !txt.isEmpty {
-                for b in result.blocks {
-                    for l in b.lines {
-                        let lineModel = LineModel()
-                        lineModel.text = l.text
-                        for c in l.cornerPoints {
-                            lineModel.cornerPoints.append(
-                                CornerPointModel(x: c.cgPointValue.x, y: c.cgPointValue.y)
-                            )
-                        }
-                        listLineModel.append(lineModel)
-                    }
-                }
-            }
-
-            // ----- draw overlays -----
             let imgSize = self.lastFrameImageSize
             DispatchQueue.main.async {
-                if !txt.isEmpty && imgSize != .zero {
+                if !text.isEmpty && imgSize != .zero {
                     if self.showTextRectangles {
-                        self.drawOverlays(for: listLineModel,
-                                          imageSize: imgSize,
-                                          turns: self.forcedQuarterTurns)
+                        // Coordinates already match oriented image space.
+                        self.drawOverlays(for: lines, imageSize: imgSize, turns: 0)
                     } else {
                         self.clearOverlays()
                     }
@@ -1204,16 +1209,138 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                     self.clearOverlays()
                 }
             }
-            // -------------------------
 
-            if !txt.isEmpty {
-                self.onTextRead(text: txt, values: listLineModel, path: "", orientation: visionImage.orientation.rawValue)
+            if !text.isEmpty {
+                self.onTextRead(text: text, values: lines, path: "", orientation: uiOrientation.rawValue)
             } else {
                 self.onTextRead(text: "", values: [], path: "", orientation: nil)
             }
+        }
+    }
 
-        } catch {
-            print("can't fetch result: \(error)")
+    // MARK: - Apple Vision OCR
+
+    private func recognizeText(
+        pixelBuffer: CVPixelBuffer,
+        orientation: CGImagePropertyOrientation,
+        recognitionLevel: VNRequestTextRecognitionLevel,
+        bufferSize: CGSize,
+        completion: @escaping (_ text: String, _ lines: [LineModel]) -> Void
+    ) {
+        let request = VNRecognizeTextRequest { request, error in
+            if let error = error {
+                print("Vision OCR error: \(error)")
+                completion("", [])
+                return
+            }
+            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+            let orientedSize = Self.orientedSize(for: bufferSize, orientation: orientation)
+            let (text, lines) = Self.mapObservations(observations, imageSize: orientedSize)
+            completion(text, lines)
+        }
+        request.recognitionLevel = recognitionLevel
+        // MRZ/OCR-B is Latin; language correction hurts machine-readable strings.
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try handler.perform([request])
+            } catch {
+                print("Vision OCR perform error: \(error)")
+                completion("", [])
+            }
+        }
+    }
+
+    private func recognizeText(
+        cgImage: CGImage,
+        orientation: CGImagePropertyOrientation,
+        recognitionLevel: VNRequestTextRecognitionLevel,
+        bufferSize: CGSize,
+        completion: @escaping (_ text: String, _ lines: [LineModel]) -> Void
+    ) {
+        let request = VNRecognizeTextRequest { request, error in
+            if let error = error {
+                print("Vision OCR error: \(error)")
+                completion("", [])
+                return
+            }
+            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+            let orientedSize = Self.orientedSize(for: bufferSize, orientation: orientation)
+            let (text, lines) = Self.mapObservations(observations, imageSize: orientedSize)
+            completion(text, lines)
+        }
+        request.recognitionLevel = recognitionLevel
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try handler.perform([request])
+            } catch {
+                print("Vision OCR perform error: \(error)")
+                completion("", [])
+            }
+        }
+    }
+
+    private static func mapObservations(
+        _ observations: [VNRecognizedTextObservation],
+        imageSize: CGSize
+    ) -> (String, [LineModel]) {
+        var lines: [LineModel] = []
+        var texts: [String] = []
+        for observation in observations {
+            guard let candidate = observation.topCandidates(1).first else { continue }
+            let line = LineModel()
+            line.text = candidate.string
+            line.cornerPoints = cornerPoints(from: observation.boundingBox, imageSize: imageSize)
+            lines.append(line)
+            texts.append(candidate.string)
+        }
+        return (texts.joined(separator: "\n"), lines)
+    }
+
+    /// Vision bounding boxes are normalized with origin at bottom-left.
+    /// Convert to image-pixel corner points (top-left origin), matching prior ML Kit shape.
+    private static func cornerPoints(from box: CGRect, imageSize: CGSize) -> [CornerPointModel] {
+        let w = imageSize.width
+        let h = imageSize.height
+        let topLeft = CGPoint(x: box.minX * w, y: (1 - box.maxY) * h)
+        let topRight = CGPoint(x: box.maxX * w, y: (1 - box.maxY) * h)
+        let bottomRight = CGPoint(x: box.maxX * w, y: (1 - box.minY) * h)
+        let bottomLeft = CGPoint(x: box.minX * w, y: (1 - box.minY) * h)
+        return [
+            CornerPointModel(x: Double(topLeft.x), y: Double(topLeft.y)),
+            CornerPointModel(x: Double(topRight.x), y: Double(topRight.y)),
+            CornerPointModel(x: Double(bottomRight.x), y: Double(bottomRight.y)),
+            CornerPointModel(x: Double(bottomLeft.x), y: Double(bottomLeft.y))
+        ]
+    }
+
+    private static func cgImageOrientation(from ui: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch ui {
+        case .up: return .up
+        case .down: return .down
+        case .left: return .left
+        case .right: return .right
+        case .upMirrored: return .upMirrored
+        case .downMirrored: return .downMirrored
+        case .leftMirrored: return .leftMirrored
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
+    }
+
+    private static func orientedSize(for bufferSize: CGSize, orientation: CGImagePropertyOrientation) -> CGSize {
+        switch orientation {
+        case .left, .leftMirrored, .right, .rightMirrored:
+            return CGSize(width: bufferSize.height, height: bufferSize.width)
+        default:
+            return bufferSize
         }
     }
 
