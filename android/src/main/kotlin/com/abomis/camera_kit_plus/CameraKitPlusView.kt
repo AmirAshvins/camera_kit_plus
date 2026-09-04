@@ -48,11 +48,12 @@ import java.util.concurrent.Executors
 class CameraKitPlusView(
     context: Context,
     messenger: BinaryMessenger,
+    viewId: Int,
     private val plugin: CameraKitPlusPlugin,
     private val focusRequired: Boolean
 ) : FrameLayout(context), PlatformView, MethodChannel.MethodCallHandler, PluginRegistry.RequestPermissionsResultListener {
 
-    private val methodChannel = MethodChannel(messenger, "camera_kit_plus")
+    private val methodChannel = MethodChannel(messenger, "camera_kit_plus/view_$viewId")
     private lateinit var previewView: PreviewView
     private lateinit var linearLayout: FrameLayout
     private var cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -227,8 +228,13 @@ class CameraKitPlusView(
     }
 
     private fun takePicture(result: MethodChannel.Result) {
+        val capture = imageCapture
+        if (capture == null) {
+            result.error("IMAGE_CAPTURE_UNAVAILABLE", "ImageCapture not ready", null)
+            return
+        }
         val file = File(context.cacheDir, "captured_image_${System.currentTimeMillis()}.jpg")
-        imageCapture?.takePicture(
+        capture.takePicture(
             ImageCapture.OutputFileOptions.Builder(file).build(),
             ContextCompat.getMainExecutor(context),
             object : ImageCapture.OnImageSavedCallback {
@@ -335,25 +341,50 @@ class CameraKitPlusView(
     override fun getView(): FrameLayout = linearLayout
 
     override fun dispose() {
+        methodChannel.setMethodCallHandler(null)
         plugin.removeListener(this)
-        cameraExecutor.shutdown()
         cameraProvider?.unbindAll()
+        try {
+            if (::barcodeScanner.isInitialized) {
+                barcodeScanner.close()
+            }
+        } catch (_: Throwable) {
+        }
+        cameraExecutor.shutdown()
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "changeFlashMode" -> (call.argument<Int>("flashModeID")!!).let { changeFlashMode(it) }
-            "switchCamera" -> (call.argument<Int>("cameraID")!!).let { switchCamera(it) }
+            "changeFlashMode" -> {
+                call.argument<Int>("flashModeID")?.let { changeFlashMode(it) }
+                result.success(true)
+            }
+            "switchCamera" -> {
+                call.argument<Int>("cameraID")?.let { switchCamera(it) }
+                result.success(true)
+            }
             "pauseCamera" -> pauseCamera(result)
             "resumeCamera" -> resumeCamera(result)
             "takePicture" -> takePicture(result)
-            "setZoom" -> (call.argument<Double>("zoom")?.toFloat())?.let { setZoom(it) }
-            "resetZoom" -> resetZoom()
-            "setMacro" -> (call.argument<Boolean>("enabled") ?: false).let { setMacro(it) }
-            "dispose" -> dispose()
+            "setZoom" -> {
+                call.argument<Double>("zoom")?.toFloat()?.let { setZoom(it) }
+                result.success(true)
+            }
+            "resetZoom" -> {
+                resetZoom()
+                result.success(true)
+            }
+            "setMacro" -> {
+                setMacro(call.argument<Boolean>("enabled") ?: false)
+                result.success(true)
+            }
+            "dispose" -> {
+                dispose()
+                result.success(true)
+            }
             else -> result.notImplemented()
-        }.let { result.success(true) }
+        }
     }
 
     @RequiresApi(Build.VERSION_CODES.N)

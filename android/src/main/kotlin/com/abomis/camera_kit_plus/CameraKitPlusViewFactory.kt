@@ -11,6 +11,6 @@ class CameraKitPlusViewFactory(private val messenger: BinaryMessenger, private v
     override fun create(context: Context, id: Int, args: Any?): PlatformView {
         val creationParams = args as? Map<String, Any?>
         val focusRequired = creationParams?.get("focusRequired") as? Boolean ?: true
-        return CameraKitPlusView(context, messenger, plugin, focusRequired)
+        return CameraKitPlusView(context, messenger, id, plugin, focusRequired)
     }
 }
