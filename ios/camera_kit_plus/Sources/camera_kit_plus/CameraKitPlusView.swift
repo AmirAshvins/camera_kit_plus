@@ -122,6 +122,10 @@ class CameraKitPlusView: NSObject,
                                                selector: #selector(handleDeviceOrientationChange),
                                                name: UIDevice.orientationDidChangeNotification,
                                                object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(handleSubjectAreaDidChange),
+                                               name: .AVCaptureDeviceSubjectAreaDidChange,
+                                               object: nil)
     }
 
     deinit {
@@ -463,7 +467,9 @@ class CameraKitPlusView: NSObject,
         do {
             try device.lockForConfiguration()
             if device.isSmoothAutoFocusSupported { device.isSmoothAutoFocusEnabled = true }
-            device.isSubjectAreaChangeMonitoringEnabled = true
+            // CAF always runs so the preview is usable. focusRequired only gates
+            // tap-to-focus / subject-area re-AF — never lock the lens at infinity.
+            device.isSubjectAreaChangeMonitoringEnabled = focusRequired
 
             if device.isFocusPointOfInterestSupported {
                 device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
@@ -473,16 +479,7 @@ class CameraKitPlusView: NSObject,
                 device.autoFocusRangeRestriction = isMacroEnabled ? .near : .none
             }
 
-            // When focusRequired is false, lock focus near infinity (matches Android AF_OFF).
-            if !focusRequired {
-                if device.isFocusModeSupported(.locked) {
-                    device.setFocusModeLocked(lensPosition: 0.0, completionHandler: nil)
-                }
-            } else if device.isFocusModeSupported(.continuousAutoFocus) {
-                device.focusMode = .continuousAutoFocus
-            } else if device.isFocusModeSupported(.autoFocus) {
-                device.focusMode = .autoFocus
-            }
+            applyContinuousAutoFocus(on: device)
 
             device.unlockForConfiguration()
 
@@ -619,6 +616,11 @@ class CameraKitPlusView: NSObject,
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTapResetZoom))
         doubleTap.numberOfTapsRequired = 2
         _view.addGestureRecognizer(doubleTap)
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTapToFocus(_:)))
+        tap.numberOfTapsRequired = 1
+        tap.require(toFail: doubleTap)
+        _view.addGestureRecognizer(tap)
     }
 
     @objc private func handlePinch(_ pinch: UIPinchGestureRecognizer) {
@@ -653,6 +655,51 @@ class CameraKitPlusView: NSObject,
 
     @objc private func handleDoubleTapResetZoom() {
         setZoom(factor: 1.0, animated: true)
+    }
+
+    @objc private func handleTapToFocus(_ tap: UITapGestureRecognizer) {
+        guard focusRequired, let device = captureDevice, let previewLayer = previewLayer else { return }
+        let viewPoint = tap.location(in: _view)
+        let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: viewPoint)
+        focus(at: devicePoint, thenLock: true)
+    }
+
+    @objc private func handleSubjectAreaDidChange() {
+        guard focusRequired else { return }
+        focus(at: CGPoint(x: 0.5, y: 0.5), thenLock: false)
+    }
+
+    /// Focus at a device-space point. After a tap, lock on that POI; otherwise resume CAF.
+    private func focus(at devicePoint: CGPoint, thenLock: Bool) {
+        guard let device = captureDevice else { return }
+        do {
+            try device.lockForConfiguration()
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = devicePoint
+            }
+            if thenLock, device.isFocusModeSupported(.autoFocus) {
+                device.focusMode = .autoFocus
+            } else {
+                applyContinuousAutoFocus(on: device)
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = devicePoint
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.unlockForConfiguration()
+        } catch {
+            print("focus error: \(error)")
+        }
+    }
+
+    private func applyContinuousAutoFocus(on device: AVCaptureDevice) {
+        if device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusMode = .continuousAutoFocus
+        } else if device.isFocusModeSupported(.autoFocus) {
+            device.focusMode = .autoFocus
+        }
     }
 
     // MARK: - Permission Button

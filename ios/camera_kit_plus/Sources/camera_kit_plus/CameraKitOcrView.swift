@@ -52,8 +52,8 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     private var didChangeAudioSession = false
     // New optional feature toggle
     var showTextRectangles: Bool = false
-    /// When true, continuous AF / tap-to-focus is more aggressive.
-    var focusRequired: Bool = false
+    /// When true, tap-to-focus and subject-area re-AF are enabled. CAF always runs.
+    var focusRequired: Bool = true
     private var viewId: Int64 = 0
 
     /// 0:camera 1:barcodeScanner 2:ocrReader
@@ -106,6 +106,10 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(handleOrientationChange),
                                                name: UIDevice.orientationDidChangeNotification,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(handleSubjectAreaDidChange),
+                                               name: .AVCaptureDeviceSubjectAreaDidChange,
                                                object: nil)
     }
     
@@ -771,6 +775,11 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTapResetZoom))
         doubleTap.numberOfTapsRequired = 2
         previewView.addGestureRecognizer(doubleTap)
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTapToFocus(_:)))
+        tap.numberOfTapsRequired = 1
+        tap.require(toFail: doubleTap)
+        previewView.addGestureRecognizer(tap)
     }
 
     @objc private func handlePinch(_ pinch: UIPinchGestureRecognizer) {
@@ -809,6 +818,51 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
     @objc private func handleDoubleTapResetZoom() {
         setZoom(factor: 1.0, animated: true)
+    }
+
+    @objc private func handleTapToFocus(_ tap: UITapGestureRecognizer) {
+        guard focusRequired, let device = captureDevice, previewLayer != nil else { return }
+        let viewPoint = tap.location(in: previewView)
+        let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: viewPoint)
+        focus(at: devicePoint, thenLock: true)
+    }
+
+    @objc private func handleSubjectAreaDidChange() {
+        guard focusRequired else { return }
+        focus(at: CGPoint(x: 0.5, y: 0.5), thenLock: false)
+    }
+
+    /// Focus at a device-space point. After a tap, lock on that POI; otherwise resume CAF.
+    private func focus(at devicePoint: CGPoint, thenLock: Bool) {
+        guard let device = captureDevice else { return }
+        do {
+            try device.lockForConfiguration()
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = devicePoint
+            }
+            if thenLock, device.isFocusModeSupported(.autoFocus) {
+                device.focusMode = .autoFocus
+            } else {
+                applyContinuousAutoFocus(on: device)
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = devicePoint
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.unlockForConfiguration()
+        } catch {
+            print("focus error: \(error)")
+        }
+    }
+
+    private func applyContinuousAutoFocus(on device: AVCaptureDevice) {
+        if device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusMode = .continuousAutoFocus
+        } else if device.isFocusModeSupported(.autoFocus) {
+            device.focusMode = .autoFocus
+        }
     }
 
     private func setZoom(factor: CGFloat, animated: Bool = true) {
@@ -927,7 +981,9 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             if device.isSmoothAutoFocusSupported {
                 device.isSmoothAutoFocusEnabled = true
             }
-            device.isSubjectAreaChangeMonitoringEnabled = true
+            // CAF always runs so the preview is usable. focusRequired only gates
+            // tap-to-focus / subject-area re-AF — never lock the lens at infinity.
+            device.isSubjectAreaChangeMonitoringEnabled = focusRequired
 
             if device.isFocusPointOfInterestSupported {
                 device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
@@ -939,16 +995,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                 device.autoFocusRangeRestriction = .none
             }
 
-            // When focusRequired is false, lock focus near infinity (matches Android AF_OFF).
-            if !focusRequired {
-                if device.isFocusModeSupported(.locked) {
-                    device.setFocusModeLocked(lensPosition: 0.0, completionHandler: nil)
-                }
-            } else if device.isFocusModeSupported(.continuousAutoFocus) {
-                device.focusMode = .continuousAutoFocus
-            } else if device.isFocusModeSupported(.autoFocus) {
-                device.focusMode = .autoFocus
-            }
+            applyContinuousAutoFocus(on: device)
 
             invokeOnMain("onMacroChanged", arguments: self.buildMacroStatus())
 

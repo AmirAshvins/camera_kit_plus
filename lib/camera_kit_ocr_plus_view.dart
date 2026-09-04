@@ -27,7 +27,7 @@ class CameraKitOcrPlusView extends StatefulWidget {
   /// Optional external controller; created internally when null.
   final CameraKitPlusController? controller;
 
-  /// When true, native continuous AF taps are more aggressive.
+  /// When true, tap-to-focus and subject-area re-AF are enabled. Continuous AF always runs.
   final bool focusRequired;
 
   /// Creates an OCR camera view.
@@ -39,7 +39,7 @@ class CameraKitOcrPlusView extends StatefulWidget {
     this.showFrame = false,
     this.showZoomSlider = false,
     this.showTextRectangles = false,
-    this.focusRequired = false,
+    this.focusRequired = true,
   });
 
   @override

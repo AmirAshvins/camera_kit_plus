@@ -25,6 +25,7 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ExtendableBuilder
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -51,6 +52,7 @@ import io.flutter.plugin.platform.PlatformView
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @RequiresApi(Build.VERSION_CODES.N)
 class CameraKitOcrPlusView(
@@ -171,10 +173,8 @@ class CameraKitOcrPlusView(
         val provider = cameraProvider ?: return
         val extBuilder: (ExtendableBuilder<*>) -> Unit = { builder ->
             val ext = Camera2Interop.Extender(builder)
-            if (!focusRequired) {
-                ext.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                ext.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0.0f)
-            } else if (macroEnabled) {
+            // CAF always runs so the preview is usable. focusRequired only gates tap-to-focus.
+            if (macroEnabled) {
                 // Match barcode view: MACRO goes on CONTROL_AF_MODE, not CONTROL_SCENE_MODE.
                 ext.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_MACRO)
             } else {
@@ -318,6 +318,11 @@ class CameraKitOcrPlusView(
         })
 
         tapDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                if (focusRequired) focusAt(e.x, e.y)
+                return true
+            }
+
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 resetZoom()
                 return true
@@ -338,6 +343,16 @@ class CameraKitOcrPlusView(
     }
 
     private fun resetZoom() = setZoom(1f)
+
+    private fun focusAt(x: Float, y: Float) {
+        val cam = camera ?: return
+        val point = previewView.meteringPointFactory.createPoint(x, y)
+        val action = FocusMeteringAction.Builder(
+            point,
+            FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
+        cam.cameraControl.startFocusAndMetering(action)
+    }
 
     @OptIn(ExperimentalCamera2Interop::class)
     private fun isMacroSupported(cam: Camera?): Boolean {

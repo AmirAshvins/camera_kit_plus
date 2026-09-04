@@ -28,7 +28,7 @@ class CameraKitPlusView extends StatefulWidget {
   /// Optional external controller; created internally when null.
   final CameraKitPlusController? controller;
 
-  /// When true, native continuous AF taps are more aggressive.
+  /// When true, tap-to-focus and subject-area re-AF are enabled. Continuous AF always runs.
   final bool focusRequired;
 
   /// Creates a barcode scanner view.
