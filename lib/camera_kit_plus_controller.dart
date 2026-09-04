@@ -1,5 +1,103 @@
+import 'package:flutter/services.dart';
+
 import 'camera_kit_plus.dart';
 
+/// Controls a single camera platform view after [bindToView].
+///
+/// View commands (pause/flash/zoom/…) go to `camera_kit_plus/view_$id`.
+/// Plugin-level APIs stay on [CameraKitPlus] (`getPlatformVersion`, permission).
 class CameraKitPlusController extends CameraKitPlus {
+  MethodChannel? _viewChannel;
+  int? _boundViewId;
+  Future<dynamic> Function(MethodCall call)? _eventHandler;
 
+  /// Whether this controller is bound to a native platform view.
+  bool get isBound => _viewChannel != null;
+
+  /// View id currently bound, if any.
+  int? get boundViewId => _boundViewId;
+
+  /// Binds this controller to the platform view [viewId] and optionally
+  /// installs an event handler for native→Dart callbacks.
+  void bindToView(
+    int viewId, {
+    Future<dynamic> Function(MethodCall call)? onEvent,
+  }) {
+    _viewChannel?.setMethodCallHandler(null);
+    _boundViewId = viewId;
+    _eventHandler = onEvent;
+    _viewChannel = MethodChannel('camera_kit_plus/view_$viewId');
+    _viewChannel!.setMethodCallHandler(_eventHandler);
+  }
+
+  /// Clears the view channel handler. Does not dispose native resources;
+  /// call native `dispose` via [disposeView] when the platform view goes away.
+  void unbind() {
+    _viewChannel?.setMethodCallHandler(null);
+    _viewChannel = null;
+    _boundViewId = null;
+    _eventHandler = null;
+  }
+
+  Future<T?> _invoke<T>(String method, [Map<String, dynamic>? args]) async {
+    final channel = _viewChannel;
+    if (channel == null) return null;
+    return channel.invokeMethod<T>(method, args);
+  }
+
+  Future<bool> pauseCamera() async {
+    return await _invoke<bool>('pauseCamera') ?? false;
+  }
+
+  Future<bool> resumeCamera() async {
+    return await _invoke<bool>('resumeCamera') ?? false;
+  }
+
+  Future<bool> changeFlashMode(CameraKitPlusFlashMode mode) async {
+    return await _invoke<bool>('changeFlashMode', {'flashModeID': mode.index}) ??
+        false;
+  }
+
+  Future<bool> switchCamera(CameraKitPlusCameraMode mode) async {
+    return await _invoke<bool>('switchCamera', {'cameraID': mode.index}) ??
+        false;
+  }
+
+  Future<String?> takePicture() async {
+    return _invoke<String>('takePicture', {'path': ''});
+  }
+
+  Future<bool?> setZoom(double zoom) async {
+    return _invoke<bool>('setZoom', {'zoom': zoom});
+  }
+
+  Future<bool?> setOcrRotation(int degree) async {
+    return _invoke<bool>('setOcrRotation', {'degrees': degree});
+  }
+
+  Future<bool?> clearOcrRotation() async {
+    return _invoke<bool>('clearOcrRotation');
+  }
+
+  Future<bool?> setMacro(bool macro) async {
+    try {
+      return await _invoke<bool>('setMacro', {'enabled': macro});
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool?> setShowTextRectangles(bool show) async {
+    try {
+      return await _invoke<bool>('setShowTextRectangles', {'show': show});
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Asks the native view to release capture resources.
+  Future<void> disposeView() async {
+    await _invoke<bool>('dispose');
+    unbind();
+  }
 }

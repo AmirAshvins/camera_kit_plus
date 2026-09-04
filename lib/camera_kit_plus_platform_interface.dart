@@ -1,10 +1,10 @@
-import 'package:camera_kit_plus/enums.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'camera_kit_plus_method_channel.dart';
 
+/// Plugin-level platform APIs (not bound to a camera view).
 abstract class CameraKitPlusPlatform extends PlatformInterface {
-  /// Constructs a CameraKitPlusPlatform.
+  /// Constructs a [CameraKitPlusPlatform].
   CameraKitPlusPlatform() : super(token: _token);
 
   static final Object _token = Object();
@@ -12,64 +12,22 @@ abstract class CameraKitPlusPlatform extends PlatformInterface {
   static CameraKitPlusPlatform _instance = MethodChannelCameraKitPlus();
 
   /// The default instance of [CameraKitPlusPlatform] to use.
-  ///
-  /// Defaults to [MethodChannelCameraKitPlus].
   static CameraKitPlusPlatform get instance => _instance;
 
   /// Platform-specific implementations should set this with their own
-  /// platform-specific class that extends [CameraKitPlusPlatform] when
-  /// they register themselves.
+  /// platform-specific class when they register themselves.
   static set instance(CameraKitPlusPlatform instance) {
     PlatformInterface.verifyToken(instance, _token);
     _instance = instance;
   }
 
+  /// Returns a descriptive platform version string.
   Future<String?> getPlatformVersion() {
-    throw UnimplementedError('platformVersion() has not been implemented.');
+    throw UnimplementedError('getPlatformVersion() has not been implemented.');
   }
 
-  Future<bool> pauseCamera() {
-    throw UnimplementedError('pauseCamera() has not been implemented.');
-  }
-
-  Future<bool> resumeCamera() {
-    throw UnimplementedError('resumeCamera() has not been implemented.');
-  }
-
-  Future<bool> changeFlashMode(CameraKitPlusFlashMode mode) {
-    throw UnimplementedError('changeFlashMode(mode) has not been implemented.');
-  }
-
-  Future<bool> switchCamera(CameraKitPlusCameraMode mode) {
-    throw UnimplementedError('switchCamera(mode) has not been implemented.');
-  }
-
+  /// Requests camera permission and returns whether it is granted.
   Future<bool> getCameraPermission() {
-    throw UnimplementedError('getCameraPermissionhas not been implemented.');
+    throw UnimplementedError('getCameraPermission() has not been implemented.');
   }
-
-  Future<String?> takePicture() {
-    throw UnimplementedError('takePicture not been implemented.');
-  }
-
-  Future<bool?> setZoom(double zoom) {
-    throw UnimplementedError('takePicture not been implemented.');
-  }
-
-  Future<bool?> setOcrRotation(int degree) {
-    throw UnimplementedError('takePicture not been implemented.');
-  }
-
-  Future<bool?> clearOcrRotation() {
-    throw UnimplementedError('takePicture not been implemented.');
-  }
-
-  Future<bool?> setMacro(bool macro) {
-    throw UnimplementedError('setMacro not been implemented.');
-  }
-
-  Future<bool?> setShowTextRectangles(bool show) {
-    throw UnimplementedError('setShowTextRectangles not been implemented.');
-  }
-
 }

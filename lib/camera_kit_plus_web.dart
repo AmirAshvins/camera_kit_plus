@@ -23,4 +23,7 @@ class CameraKitPlusWeb extends CameraKitPlusPlatform {
     final version = web.window.navigator.userAgent;
     return version;
   }
+
+  @override
+  Future<bool> getCameraPermission() async => false;
 }

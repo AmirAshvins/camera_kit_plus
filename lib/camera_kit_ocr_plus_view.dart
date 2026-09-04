@@ -1,6 +1,5 @@
 import 'dart:convert';
-import 'dart:developer';
-import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,15 +7,30 @@ import 'package:visibility_detector/visibility_detector.dart';
 
 import 'camera_kit_plus_controller.dart';
 
+/// Live OCR platform view backed by native ML Kit (Android) / Vision (iOS).
 class CameraKitOcrPlusView extends StatefulWidget {
+  /// Called for each OCR frame result.
   final void Function(OcrData data)? onTextRead;
+
+  /// Called when native zoom changes (pinch / macro).
   final void Function(double zoom)? onZoomChanged;
+
+  /// Shows the scanner frame overlay asset.
   final bool showFrame;
+
+  /// Shows an on-screen zoom slider.
   final bool showZoomSlider;
+
+  /// Asks native to draw text bounding rectangles.
   final bool showTextRectangles;
+
+  /// Optional external controller; created internally when null.
   final CameraKitPlusController? controller;
+
+  /// When true, native continuous AF taps are more aggressive.
   final bool focusRequired;
 
+  /// Creates an OCR camera view.
   const CameraKitOcrPlusView({
     super.key,
     required this.onTextRead,
@@ -25,21 +39,23 @@ class CameraKitOcrPlusView extends StatefulWidget {
     this.showFrame = false,
     this.showZoomSlider = false,
     this.showTextRectangles = false,
-    this.focusRequired = false, // Default to false for OCR
+    this.focusRequired = false,
   });
 
   @override
   State<CameraKitOcrPlusView> createState() => _CameraKitOcrPlusViewState();
 }
 
-class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView> with WidgetsBindingObserver {
-  static const channel = MethodChannel('camera_kit_plus');
+class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
+    with WidgetsBindingObserver {
   late CameraKitPlusController controller;
+  bool _ownsController = false;
   bool isVisible = false;
   double zoom = 1;
 
   @override
   void initState() {
+    _ownsController = widget.controller == null;
     controller = widget.controller ?? CameraKitPlusController();
     WidgetsBinding.instance.addObserver(this);
     super.initState();
@@ -63,8 +79,8 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView> with Widget
   Widget _buildPlatformView() {
     const String viewType = 'camera-kit-ocr-plus-view';
     final Map<String, dynamic> creationParams = <String, dynamic>{
-      "showTextRectangles": widget.showTextRectangles,
-      "focusRequired": widget.focusRequired,
+      'showTextRectangles': widget.showTextRectangles,
+      'focusRequired': widget.focusRequired,
     };
 
     switch (defaultTargetPlatform) {
@@ -83,7 +99,9 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView> with Widget
           creationParamsCodec: const StandardMessageCodec(),
         );
       default:
-        return Text('$defaultTargetPlatform is not yet supported by the camera_kit_plus plugin');
+        return Text(
+          '$defaultTargetPlatform is not yet supported by the camera_kit_plus plugin',
+        );
     }
   }
 
@@ -95,7 +113,7 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView> with Widget
           width: MediaQuery.of(context).size.width * 0.9,
           height: MediaQuery.of(context).size.width * 0.9 * 0.7,
           child: Image.asset(
-            "assets/images/scanner_frame.png",
+            'assets/images/scanner_frame.png',
             package: 'camera_kit_plus',
             fit: BoxFit.fill,
           ),
@@ -136,25 +154,32 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView> with Widget
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    // controller.dispose();
+    if (_ownsController) {
+      controller.disposeView();
+    } else {
+      controller.unbind();
+    }
     super.dispose();
   }
 
   void _onPlatformViewCreated(int id) {
-    channel.setMethodCallHandler(_methodCallHandler);
+    controller.bindToView(id, onEvent: _methodCallHandler);
   }
 
   Future<dynamic> _methodCallHandler(MethodCall methodCall) async {
     switch (methodCall.method) {
-      case "onTextRead":
-        final data = OcrData.fromJson(jsonDecode(methodCall.arguments.toString()));
+      case 'onTextRead':
+        final data =
+            OcrData.fromJson(jsonDecode(methodCall.arguments.toString()));
         widget.onTextRead?.call(data);
         break;
-      case "onZoomChanged":
+      case 'onZoomChanged':
         if (methodCall.arguments is double) {
-          setState(() => zoom = methodCall.arguments);
-          widget.onZoomChanged?.call(methodCall.arguments);
+          setState(() => zoom = methodCall.arguments as double);
+          widget.onZoomChanged?.call(methodCall.arguments as double);
         }
+        break;
+      case 'onMacroChanged':
         break;
     }
   }
@@ -172,71 +197,100 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView> with Widget
   }
 }
 
+/// OCR result payload matching native `OcrData` JSON.
 class OcrData {
+  /// Creates OCR data.
   OcrData({
     required this.text,
-    this.path = "",
+    this.path = '',
     this.orientation = 0,
     required this.lines,
   });
 
+  /// Full recognized text (lines joined by newlines).
   String text;
+
+  /// Optional still-image path.
   String path;
+
+  /// UIImage orientation raw value when known.
   int orientation;
+
+  /// Per-line text and corner points.
   List<OcrLine> lines;
 
+  /// Parses JSON from native `onTextRead`.
   factory OcrData.fromJson(Map<String, dynamic> json) => OcrData(
-    text: json["text"],
-    path: json["path"] ?? "",
-    orientation: json["orientation"] ?? 0,
-    lines: List<OcrLine>.from((json["lines"] ?? []).map((x) => OcrLine.fromJson(x))),
-  );
+        text: json['text'],
+        path: json['path'] ?? '',
+        orientation: json['orientation'] ?? 0,
+        lines: List<OcrLine>.from(
+          (json['lines'] ?? []).map((x) => OcrLine.fromJson(x)),
+        ),
+      );
 
+  /// Serializes to JSON.
   Map<String, dynamic> toJson() => {
-    "text": text,
-    "path": path,
-    "orientation": orientation,
-    "lines": List<dynamic>.from(lines.map((x) => x.toJson())),
-  };
+        'text': text,
+        'path': path,
+        'orientation': orientation,
+        'lines': List<dynamic>.from(lines.map((x) => x.toJson())),
+      };
 }
 
+/// A single OCR text line.
 class OcrLine {
+  /// Creates an OCR line.
   OcrLine({
     required this.text,
     required this.cornerPoints,
   });
 
+  /// Recognized line text.
   String text;
+
+  /// Bounding quad in image-pixel space.
   List<OcrPoint> cornerPoints;
 
+  /// Parses JSON (supports legacy `a`/`b` keys).
   factory OcrLine.fromJson(Map<String, dynamic> json) => OcrLine(
-    text: json["text"] ?? json["a"] ?? "",
-    cornerPoints: List<OcrPoint>.from((json["cornerPoints"] ?? json["b"] ?? []).map((x) => OcrPoint.fromJson(x))),
-  );
+        text: json['text'] ?? json['a'] ?? '',
+        cornerPoints: List<OcrPoint>.from(
+          (json['cornerPoints'] ?? json['b'] ?? [])
+              .map((x) => OcrPoint.fromJson(x)),
+        ),
+      );
 
+  /// Serializes to JSON.
   Map<String, dynamic> toJson() => {
-    "text": text,
-    "cornerPoints": List<dynamic>.from(cornerPoints.map((x) => x.toJson())),
-  };
+        'text': text,
+        'cornerPoints': List<dynamic>.from(cornerPoints.map((x) => x.toJson())),
+      };
 }
 
+/// A point in image-pixel coordinates.
 class OcrPoint {
+  /// Creates an OCR point.
   OcrPoint({
     required this.x,
     required this.y,
   });
 
+  /// X coordinate.
   double x;
+
+  /// Y coordinate.
   double y;
 
+  /// Parses JSON (supports legacy `a`/`b` keys).
   factory OcrPoint.fromJson(Map<String, dynamic> json) => OcrPoint(
-    x: (json["x"] ?? json["a"]).toDouble(),
-    y: (json["y"] ?? json["b"]).toDouble(),
-  );
+        x: (json['x'] ?? json['a']).toDouble(),
+        y: (json['y'] ?? json['b']).toDouble(),
+      );
 
+  /// Serializes to JSON.
   Map<String, dynamic> toJson() => {
-    "x": x,
-    "y": y,
-  };
+        'x': x,
+        'y': y,
+      };
 }
-
