@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -49,13 +50,16 @@ class CameraKitOcrPlusView extends StatefulWidget {
 class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
     with WidgetsBindingObserver {
   late CameraKitPlusController controller;
-  bool _ownsController = false;
   bool isVisible = false;
   double zoom = 1;
 
+  /// Per-instance key — shared const keys break [VisibilityDetector] tracking
+  /// when multiple scanners are mounted (mode switches, dialogs, covered routes).
+  late final Key _visibilityKey =
+      Key('camera-kit-ocr-plus-view-${identityHashCode(this)}');
+
   @override
   void initState() {
-    _ownsController = widget.controller == null;
     controller = widget.controller ?? CameraKitPlusController();
     WidgetsBinding.instance.addObserver(this);
     super.initState();
@@ -66,7 +70,7 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
     return Stack(
       children: [
         VisibilityDetector(
-          key: const Key('camera-kit-ocr-plus-view'),
+          key: _visibilityKey,
           onVisibilityChanged: _onVisibilityChanged,
           child: _buildPlatformView(),
         ),
@@ -154,12 +158,22 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    if (_ownsController) {
-      controller.disposeView();
+    // VisibilityDetector often skips fraction=0 on dispose; always stop capture
+    // before clearing the channel — including external (host-owned) controllers.
+    unawaited(_releaseCamera());
+    super.dispose();
+  }
+
+  /// Stops native capture then unbinds the per-view method channel.
+  ///
+  /// Host controllers are rebound via [CameraKitPlusController.bindToView] when
+  /// a new platform view is created after remount.
+  Future<void> _releaseCamera() async {
+    if (controller.isBound) {
+      await controller.disposeView();
     } else {
       controller.unbind();
     }
-    super.dispose();
   }
 
   void _onPlatformViewCreated(int id) {

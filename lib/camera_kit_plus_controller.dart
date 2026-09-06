@@ -30,8 +30,9 @@ class CameraKitPlusController extends CameraKitPlus {
     _viewChannel!.setMethodCallHandler(_eventHandler);
   }
 
-  /// Clears the view channel handler. Does not dispose native resources;
-  /// call native `dispose` via [disposeView] when the platform view goes away.
+  /// Clears the view channel handler. Does not stop native capture;
+  /// prefer [disposeView] (or [pauseCamera] then [unbind]) when the platform
+  /// view is leaving so the session does not stay armed with no Dart channel.
   void unbind() {
     _viewChannel?.setMethodCallHandler(null);
     _viewChannel = null;
@@ -95,7 +96,9 @@ class CameraKitPlusController extends CameraKitPlus {
     }
   }
 
-  /// Asks the native view to release capture resources.
+  /// Asks the native view to release capture resources, then [unbind]s.
+  ///
+  /// Safe to call when unbound (no-ops the invoke, still clears handlers).
   Future<void> disposeView() async {
     await _invoke<bool>('dispose');
     unbind();

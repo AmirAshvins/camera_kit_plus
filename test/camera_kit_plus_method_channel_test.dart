@@ -82,5 +82,23 @@ void main() {
       expect(await controller.pauseCamera(), isFalse);
       expect(await controller.takePicture(), isNull);
     });
+
+    test('disposeView invokes native dispose then unbinds', () async {
+      await controller.disposeView();
+      expect(calls.single.method, 'dispose');
+      expect(controller.isBound, isFalse);
+      // Further pause after dispose must no-op (channel cleared).
+      expect(await controller.pauseCamera(), isFalse);
+    });
+
+    test('external host can pause then disposeView like widget teardown',
+        () async {
+      // Mirrors CameraKitPlusView.dispose for host-owned controllers: stop
+      // capture via disposeView so the session does not stay armed after unbind.
+      expect(await controller.pauseCamera(), isTrue);
+      await controller.disposeView();
+      expect(calls.map((c) => c.method), ['pauseCamera', 'dispose']);
+      expect(controller.isBound, isFalse);
+    });
   });
 }
