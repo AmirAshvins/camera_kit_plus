@@ -9,6 +9,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.util.Log
+import android.util.Size
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -20,7 +21,6 @@ import androidx.annotation.RequiresApi
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
-import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
@@ -31,6 +31,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.TorchState
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
@@ -76,7 +77,11 @@ class CameraKitOcrPlusView(
 
     private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
+    private var imageAnalysis: ImageAnalysis? = null
     private val REQUEST_CAMERA_PERMISSION = 1001
+
+    private var lastOcrTs: Long = 0
+    private val ocrMinIntervalMs = 333L
 
     private val focusRequired: Boolean = args?.get("focusRequired") as? Boolean ?: true
     private var showTextRectangles: Boolean = args?.get("showTextRectangles") as? Boolean ?: false
@@ -182,24 +187,27 @@ class CameraKitOcrPlusView(
             }
         }
 
-        val previewBuilder = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_16_9)
+        val previewSize = Size(1280, 720)
+        val analysisSize = Size(640, 480)
+        val previewBuilder = Preview.Builder().setTargetResolution(previewSize)
         extBuilder(previewBuilder)
         preview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
         val analysisBuilder = ImageAnalysis.Builder()
+            .setTargetResolution(analysisSize)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
         extBuilder(analysisBuilder)
-        val imageAnalysis = analysisBuilder.build().also {
+        imageAnalysis = analysisBuilder.build().also {
             it.setAnalyzer(cameraExecutor, ::processImageProxy)
         }
 
         val captureBuilder = ImageCapture.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+            .setTargetResolution(previewSize)
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
         extBuilder(captureBuilder)
         imageCapture = captureBuilder.build()
 
-        provider.unbindAll()
+        unbindOwnUseCases()
         try {
             camera = cameraSelector?.let {
                 provider.bindToLifecycle(lifecycleOwner, it, preview, imageCapture, imageAnalysis)
@@ -218,17 +226,30 @@ class CameraKitOcrPlusView(
 
     private fun setupCamera() {
         val activity = getActivity(context) as? LifecycleOwner ?: return
+        ensureTextScanner()
         if (cameraProvider != null) {
             bindUseCases(activity)
             return
         }
 
-        textScanner = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
         ProcessCameraProvider.getInstance(context).addListener({
             cameraProvider = ProcessCameraProvider.getInstance(context).get()
             bindUseCases(activity)
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun ensureTextScanner() {
+        if (::textScanner.isInitialized) return
+        textScanner = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
+
+    private fun unbindOwnUseCases() {
+        val provider = cameraProvider ?: return
+        val bound = listOfNotNull(preview, imageCapture, imageAnalysis)
+        if (bound.isNotEmpty()) {
+            provider.unbind(*bound.toTypedArray())
+        }
+        camera = null
     }
 
     private fun takePicture(result: MethodChannel.Result) {
@@ -269,6 +290,12 @@ class CameraKitOcrPlusView(
             imageProxy.close()
             return
         }
+        val now = System.currentTimeMillis()
+        if (now - lastOcrTs < ocrMinIntervalMs) {
+            imageProxy.close()
+            return
+        }
+        lastOcrTs = now
         val rotation = ocrRotationOverride ?: imageProxy.imageInfo.rotationDegrees
         val image = InputImage.fromMediaImage(mediaImage, rotation)
         textScanner.process(image)
@@ -391,7 +418,7 @@ class CameraKitOcrPlusView(
     override fun dispose() {
         methodChannel.setMethodCallHandler(null)
         plugin?.removeListener(this)
-        cameraProvider?.unbindAll()
+        unbindOwnUseCases()
         try {
             if (::textScanner.isInitialized) {
                 textScanner.close()
@@ -407,6 +434,7 @@ class CameraKitOcrPlusView(
                 call.argument<Int>("flashModeID")?.let { changeFlashMode(it) }
                 result.success(true)
             }
+            "getFlashMode" -> result.success(isTorchOn())
             "switchCamera" -> {
                 call.argument<Int>("cameraID")?.let { switchCamera(it) }
                 result.success(true)
@@ -461,12 +489,16 @@ class CameraKitOcrPlusView(
     }
 
     private fun pauseCamera(result: MethodChannel.Result?) {
-        cameraProvider?.unbindAll()
+        unbindOwnUseCases()
         result?.success(true)
     }
 
     private fun changeFlashMode(flashModeID: Int) {
         camera?.cameraControl?.enableTorch(flashModeID == 1)
+    }
+
+    private fun isTorchOn(): Boolean {
+        return camera?.cameraInfo?.torchState?.value == TorchState.ON
     }
 
     private fun setMacro(enabled: Boolean) {

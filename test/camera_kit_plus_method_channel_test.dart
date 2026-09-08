@@ -73,6 +73,11 @@ void main() {
       expect((calls.single.arguments as Map)['flashModeID'], 1);
     });
 
+    test('getFlashMode queries native torch', () async {
+      expect(await controller.getFlashMode(), isTrue);
+      expect(calls.single.method, 'getFlashMode');
+    });
+
     test('takePicture returns path', () async {
       expect(await controller.takePicture(), '/tmp/a.jpg');
     });

@@ -11,6 +11,7 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.util.Log
+import android.util.Size
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -51,7 +52,9 @@ class CameraKitPlusView(
     messenger: BinaryMessenger,
     viewId: Int,
     private val plugin: CameraKitPlusPlugin,
-    private val focusRequired: Boolean
+    private val focusRequired: Boolean,
+    private val highScanQuality: Boolean = false,
+    private val textAssistEnabled: Boolean = false,
 ) : FrameLayout(context), PlatformView, MethodChannel.MethodCallHandler, PluginRegistry.RequestPermissionsResultListener {
 
     private val methodChannel = MethodChannel(messenger, "camera_kit_plus/view_$viewId")
@@ -61,12 +64,22 @@ class CameraKitPlusView(
     private var imageCapture: ImageCapture? = null
 
     private lateinit var barcodeScanner: BarcodeScanner
+    private var textScanner: com.google.mlkit.vision.text.TextRecognizer? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var cameraSelector: CameraSelector? = null
 
     private var preview: Preview? = null
+    private var imageAnalysis: ImageAnalysis? = null
     val REQUEST_CAMERA_PERMISSION = 1001
+
+    // Same-value debounce so Dart is not flooded while a pass stays in frame.
+    private var lastBarcodePayload: String? = null
+    private var lastBarcodeEmitMs: Long = 0
+    private val barcodeDebounceMs = 400L
+    private val sessionStartedAtMs = System.currentTimeMillis()
+    private var lastTextAssistMs: Long = 0
+    private var didEmitBarcode = false
 
     // ====== Zoom state / gestures ======
     private var scaleDetector: ScaleGestureDetector? = null
@@ -179,24 +192,33 @@ class CameraKitPlusView(
             }
         }
 
-        val previewBuilder = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_16_9)
+        val targetSize = if (highScanQuality) Size(1920, 1080) else Size(1280, 720)
+        val previewBuilder = Preview.Builder().setTargetResolution(targetSize)
         extBuilder(previewBuilder)
         preview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-        val analysisBuilder = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        val analysisBuilder = ImageAnalysis.Builder()
+            .setTargetResolution(targetSize)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
         extBuilder(analysisBuilder)
-        val imageAnalysis = analysisBuilder.build().also { it.setAnalyzer(cameraExecutor, ::processImageProxy) }
+        imageAnalysis = analysisBuilder.build().also { it.setAnalyzer(cameraExecutor, ::processImageProxy) }
 
         val captureBuilder = ImageCapture.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+            .setTargetResolution(targetSize)
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
         extBuilder(captureBuilder)
         imageCapture = captureBuilder.build()
 
-        provider.unbindAll()
+        unbindOwnUseCases()
         try {
             camera = cameraSelector?.let {
-                provider.bindToLifecycle(lifecycleOwner, it, preview, imageCapture, imageAnalysis)
+                provider.bindToLifecycle(
+                    lifecycleOwner,
+                    it,
+                    preview,
+                    imageCapture,
+                    imageAnalysis
+                )
             }
         } catch (exc: Exception) {
             Log.e("CameraX", "Use case binding failed", exc)
@@ -213,20 +235,66 @@ class CameraKitPlusView(
     @RequiresApi(Build.VERSION_CODES.N)
     private fun setupCamera() {
         val activity = getActivity(context) as? LifecycleOwner ?: return
+        ensureBarcodeScanner()
         if (cameraProvider != null) {
             bindUseCases(activity)
             return
         }
-
-        barcodeScanner = BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS).build()
-        )
 
         ProcessCameraProvider.getInstance(context).addListener({
             cameraProvider = ProcessCameraProvider.getInstance(context).get()
             logAllAvailableCameras()
             bindUseCases(activity)
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun ensureBarcodeScanner() {
+        if (::barcodeScanner.isInitialized) return
+        barcodeScanner = BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder().setBarcodeFormats(
+                Barcode.FORMAT_PDF417,
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_AZTEC,
+                Barcode.FORMAT_DATA_MATRIX,
+                Barcode.FORMAT_CODE_128
+            ).build()
+        )
+    }
+
+    private fun maybeTextAssist(image: InputImage, imageProxy: ImageProxy) {
+        val now = System.currentTimeMillis()
+        val shouldRun = textAssistEnabled &&
+            !didEmitBarcode &&
+            now - sessionStartedAtMs >= 800L &&
+            now - lastTextAssistMs >= 500L
+        if (!shouldRun) {
+            imageProxy.close()
+            return
+        }
+        lastTextAssistMs = now
+        if (textScanner == null) {
+            textScanner = com.google.mlkit.vision.text.TextRecognition.getClient(
+                com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS
+            )
+        }
+        textScanner!!.process(image)
+            .addOnSuccessListener { result ->
+                val content = result.text.trim()
+                if (content.isNotEmpty() && !didEmitBarcode) {
+                    invokeOnMain("onTextAssist", content)
+                }
+            }
+            .addOnCompleteListener { imageProxy.close() }
+    }
+
+    private fun unbindOwnUseCases() {
+        val provider = cameraProvider ?: return
+        val bound = listOfNotNull(preview, imageCapture, imageAnalysis)
+        if (bound.isNotEmpty()) {
+            provider.unbind(*bound.toTypedArray())
+        }
+        camera = null
+    }
     }
 
     private fun takePicture(result: MethodChannel.Result) {
@@ -257,19 +325,28 @@ class CameraKitPlusView(
 
     @OptIn(ExperimentalGetImage::class)
     private fun processImageProxy(imageProxy: ImageProxy) {
-        if (imageProxy.image == null) {
+        if (imageProxy.image == null || !::barcodeScanner.isInitialized) {
             imageProxy.close()
             return
         }
         val image = InputImage.fromMediaImage(imageProxy.image!!, imageProxy.imageInfo.rotationDegrees)
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes ->
-                barcodes.firstNotNullOfOrNull { it.rawValue }?.let {
-                    invokeOnMain("onBarcodeScanned", it)
+                barcodes.firstNotNullOfOrNull { it.rawValue }?.let { value ->
+                    val now = System.currentTimeMillis()
+                    if (value == lastBarcodePayload && now - lastBarcodeEmitMs < barcodeDebounceMs) {
+                        return@addOnSuccessListener
+                    }
+                    lastBarcodePayload = value
+                    lastBarcodeEmitMs = now
+                    didEmitBarcode = true
+                    invokeOnMain("onBarcodeScanned", value)
                 }
             }
             .addOnFailureListener { Log.e("Barcode", "Failed to scan barcode", it) }
-            .addOnCompleteListener { imageProxy.close() }
+            .addOnCompleteListener {
+                maybeTextAssist(image, imageProxy)
+            }
     }
 
     private fun attachPinchToZoom() {
@@ -360,11 +437,12 @@ class CameraKitPlusView(
     override fun dispose() {
         methodChannel.setMethodCallHandler(null)
         plugin.removeListener(this)
-        cameraProvider?.unbindAll()
+        unbindOwnUseCases()
         try {
             if (::barcodeScanner.isInitialized) {
                 barcodeScanner.close()
             }
+            textScanner?.close()
         } catch (_: Throwable) {
         }
         cameraExecutor.shutdown()
@@ -377,6 +455,7 @@ class CameraKitPlusView(
                 call.argument<Int>("flashModeID")?.let { changeFlashMode(it) }
                 result.success(true)
             }
+            "getFlashMode" -> result.success(isTorchOn())
             "switchCamera" -> {
                 call.argument<Int>("cameraID")?.let { switchCamera(it) }
                 result.success(true)
@@ -419,16 +498,16 @@ class CameraKitPlusView(
     }
 
     private fun pauseCamera(result: MethodChannel.Result?) {
-        cameraProvider?.unbindAll()
-        try {
-            barcodeScanner.close()
-        } catch (_: Throwable) {
-        }
+        unbindOwnUseCases()
         result?.success(true)
     }
 
     private fun changeFlashMode(flashModeID: Int) {
         camera?.cameraControl?.enableTorch(flashModeID == 1)
+    }
+
+    private fun isTorchOn(): Boolean {
+        return camera?.cameraInfo?.torchState?.value == TorchState.ON
     }
 
     @RequiresApi(Build.VERSION_CODES.N)

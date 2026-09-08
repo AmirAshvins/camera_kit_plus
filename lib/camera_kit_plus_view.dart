@@ -32,6 +32,15 @@ class CameraKitPlusView extends StatefulWidget {
   /// When true, tap-to-focus and subject-area re-AF are enabled. Continuous AF always runs.
   final bool focusRequired;
 
+  /// `high` uses 1080p / ~20 fps for PDF417; anything else stays 720p / 15 fps.
+  final String? scanQuality;
+
+  /// When true, native runs gated printed-text OCR for overlay chips.
+  final bool textAssist;
+
+  /// Called with raw OCR text from [textAssist] (not a barcode).
+  final void Function(String text)? onTextAssist;
+
   /// Creates a barcode scanner view.
   const CameraKitPlusView({
     super.key,
@@ -42,6 +51,9 @@ class CameraKitPlusView extends StatefulWidget {
     this.showFrame = false,
     this.showZoomSlider = false,
     this.focusRequired = true,
+    this.scanQuality,
+    this.textAssist = false,
+    this.onTextAssist,
   });
 
   @override
@@ -115,6 +127,8 @@ class _CameraKitPlusViewState extends State<CameraKitPlusView>
     const String viewType = 'camera-kit-plus-view';
     final Map<String, dynamic> creationParams = <String, dynamic>{
       'focusRequired': widget.focusRequired,
+      if (widget.scanQuality != null) 'scanQuality': widget.scanQuality,
+      'textAssist': widget.textAssist,
     };
 
     switch (defaultTargetPlatform) {
@@ -184,6 +198,9 @@ class _CameraKitPlusViewState extends State<CameraKitPlusView>
     switch (methodCall.method) {
       case 'onBarcodeScanned':
         widget.onBarcodeRead?.call(methodCall.arguments.toString());
+        break;
+      case 'onTextAssist':
+        widget.onTextAssist?.call(methodCall.arguments.toString());
         break;
       case 'onBarcodeDataScanned':
         final data =

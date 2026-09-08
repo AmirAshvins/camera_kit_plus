@@ -11,6 +11,12 @@ class CameraKitPlusController extends CameraKitPlus {
   int? _boundViewId;
   Future<dynamic> Function(MethodCall call)? _eventHandler;
 
+  /// Host hook when a platform view binds (scan session started).
+  static void Function(CameraKitPlusController controller)? onViewBound;
+
+  /// Host hook when a platform view unbinds (scan session ended).
+  static void Function(CameraKitPlusController controller)? onViewUnbound;
+
   /// Whether this controller is bound to a native platform view.
   bool get isBound => _viewChannel != null;
 
@@ -28,16 +34,21 @@ class CameraKitPlusController extends CameraKitPlus {
     _eventHandler = onEvent;
     _viewChannel = MethodChannel('camera_kit_plus/view_$viewId');
     _viewChannel!.setMethodCallHandler(_eventHandler);
+    onViewBound?.call(this);
   }
 
   /// Clears the view channel handler. Does not stop native capture;
   /// prefer [disposeView] (or [pauseCamera] then [unbind]) when the platform
   /// view is leaving so the session does not stay armed with no Dart channel.
   void unbind() {
+    final wasBound = _viewChannel != null;
     _viewChannel?.setMethodCallHandler(null);
     _viewChannel = null;
     _boundViewId = null;
     _eventHandler = null;
+    if (wasBound) {
+      onViewUnbound?.call(this);
+    }
   }
 
   Future<T?> _invoke<T>(String method, [Map<String, dynamic>? args]) async {
@@ -57,6 +68,15 @@ class CameraKitPlusController extends CameraKitPlus {
   Future<bool> changeFlashMode(CameraKitPlusFlashMode mode) async {
     return await _invoke<bool>('changeFlashMode', {'flashModeID': mode.index}) ??
         false;
+  }
+
+  /// Whether the device torch is currently on (native camera state).
+  Future<bool> getFlashMode() async {
+    try {
+      return await _invoke<bool>('getFlashMode') ?? false;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<bool> switchCamera(CameraKitPlusCameraMode mode) async {

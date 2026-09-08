@@ -38,6 +38,11 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     
     private var ocrReady = false
     private var isProcessingOcr = false
+    /// Minimum gap between live OCR requests (~3/s).
+    private var lastOcrTs: CFAbsoluteTime = 0
+    private let ocrMinInterval: CFAbsoluteTime = 0.33
+    /// Live Vision jobs: 0 and 1 = `.accurate`, 2 = `.fast`, then wrap.
+    private var liveOcrCycleIndex = 0
     var flutterResultTakePicture:FlutterResult!
     var flutterResultOcr:FlutterResult!
     var orientation : UIImage.Orientation!
@@ -190,6 +195,9 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             let mode = (myArgs?["flashModeID"] as? Int) ?? 0
             changeFlashMode(modeID: mode, result: result)
 
+        case "getFlashMode":
+            result(self.captureDevice?.isTorchActive ?? false)
+
         case "switchCamera":
             let cameraID = (myArgs?["cameraID"] as? Int) ?? 0
             self.switchCamera(cameraID: cameraID, result: result)
@@ -265,9 +273,22 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         }
     }
 
-    /// Stops capture and clears the per-view method channel handler.
+    /// Stops capture, tears down session I/O, and clears the method channel.
     private func disposeNative() {
         stopCamera()
+        liveOcrCycleIndex = 0
+        isProcessingOcr = false
+        sessionQueue.async {
+            self.session.beginConfiguration()
+            for input in self.session.inputs {
+                self.session.removeInput(input)
+            }
+            for output in self.session.outputs {
+                self.session.removeOutput(output)
+            }
+            self.session.commitConfiguration()
+            self.captureDevice = nil
+        }
         channel.setMethodCallHandler(nil)
     }
 
@@ -336,7 +357,8 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
     @available(iOS 13.0, *)
     func setupAVCapture(){
-        session.sessionPreset = AVCaptureSession.Preset.hd1920x1080
+        // 720p live OCR; frames cycle 2× `.accurate` then 1× `.fast`. Still-photo stays `.accurate`.
+        session.sessionPreset = AVCaptureSession.Preset.hd1280x720
 
         // pick best back camera
             if cameraPosition == .back, let dev = bestBackCamera() {
@@ -354,11 +376,23 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
     func beginSession(isFirst: Bool = true){
         var deviceInput: AVCaptureDeviceInput!
+        liveOcrCycleIndex = 0
+        isProcessingOcr = false
 
         do {
+            // Clear prior inputs/outputs so resume/re-init cannot duplicate them.
+            session.beginConfiguration()
+            for input in session.inputs {
+                session.removeInput(input)
+            }
+            for output in session.outputs {
+                session.removeOutput(output)
+            }
+
             deviceInput = try AVCaptureDeviceInput(device: captureDevice)
             guard deviceInput != nil else {
                 print("error: cant get deviceInput")
+                session.commitConfiguration()
                 return
             }
 
@@ -385,9 +419,9 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
             AudioServicesDisposeSystemSoundID(1108)
 
-            // Photo output
+            // Photo output — skip high-res stills; live OCR does not need them.
             photoOutput = AVCapturePhotoOutput()
-            photoOutput?.isHighResolutionCaptureEnabled = true
+            photoOutput?.isHighResolutionCaptureEnabled = false
             photoOutput?.setPreparedPhotoSettingsArray(
                 [AVCapturePhotoSettings(format: [AVVideoCodecKey : AVVideoCodecJPEG])],
                 completionHandler: nil
@@ -396,8 +430,24 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                 session.addOutput(photoOutput!)
             }
 
-            // Apply focus/AF settings (macro-aware)
             applyFocusConfiguration()
+            if let device = captureDevice {
+                do {
+                    try device.lockForConfiguration()
+                    let fps = CMTime(value: 1, timescale: 15)
+                    if device.activeFormat.videoSupportedFrameRateRanges.contains(where: {
+                        $0.minFrameDuration <= fps && $0.maxFrameDuration >= fps
+                    }) {
+                        device.activeVideoMinFrameDuration = fps
+                        device.activeVideoMaxFrameDuration = fps
+                    }
+                    device.unlockForConfiguration()
+                } catch {
+                    print("OCR frame-rate config error: \(error)")
+                }
+            }
+
+            session.commitConfiguration()
 
             // Preview
             previewLayer = AVCaptureVideoPreviewLayer(session: self.session)
@@ -407,6 +457,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
         } catch let error as NSError {
             deviceInput = nil
+            session.commitConfiguration()
             print("error: \(error.localizedDescription)")
         }
     }
@@ -486,10 +537,9 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
             switch mode {
             case .on:
-                // Use max available torch level if we can, else default ON
-        
-                let level = min(1.0, AVCaptureDevice.maxAvailableTorchLevel)
-                    try? device.setTorchModeOn(level: level)
+                // Moderate torch — max level overheats during live OCR.
+                let level = min(0.5, AVCaptureDevice.maxAvailableTorchLevel)
+                try? device.setTorchModeOn(level: level)
 
             case .auto:
                 device.torchMode = .auto
@@ -1217,6 +1267,8 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard ocrReady, !isProcessingOcr else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastOcrTs >= ocrMinInterval else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let bufferW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
@@ -1228,12 +1280,18 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         let cgOrientation = Self.cgImageOrientation(from: uiOrientation)
         lastFrameImageSize = Self.orientedSize(for: bufferSize, orientation: cgOrientation)
 
+        lastOcrTs = now
         isProcessingOcr = true
+        // Two accurate votes first so the first frames are usable, then one cheap tracker frame.
+        let recognitionLevel: VNRequestTextRecognitionLevel =
+            (liveOcrCycleIndex % 3 == 2) ? .fast : .accurate
+        liveOcrCycleIndex += 1
         recognizeText(
             pixelBuffer: pixelBuffer,
             orientation: cgOrientation,
-            recognitionLevel: .accurate,
-            bufferSize: bufferSize
+            recognitionLevel: recognitionLevel,
+            bufferSize: bufferSize,
+            regionOfInterest: CGRect(x: 0, y: 0, width: 1, height: 0.5)
         ) { [weak self] text, lines in
             guard let self = self else { return }
             self.isProcessingOcr = false
@@ -1266,6 +1324,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         orientation: CGImagePropertyOrientation,
         recognitionLevel: VNRequestTextRecognitionLevel,
         bufferSize: CGSize,
+        regionOfInterest: CGRect? = nil,
         completion: @escaping (_ text: String, _ lines: [LineModel]) -> Void
     ) {
         let request = VNRecognizeTextRequest { request, error in
@@ -1283,6 +1342,9 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         // MRZ/OCR-B is Latin; language correction hurts machine-readable strings.
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = false
+        if let roi = regionOfInterest {
+            request.regionOfInterest = roi
+        }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
         DispatchQueue.global(qos: .userInitiated).async {

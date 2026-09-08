@@ -8,9 +8,9 @@ import Flutter
 import UIKit
 import Foundation
 import AVFoundation
-import Vision
 import CoreGraphics
 import AudioToolbox
+import Vision
 
 class CameraContainerView: UIView {
     var onLayoutSubviews: (() -> Void)?
@@ -34,7 +34,6 @@ class CameraKitPlusView: NSObject,
     var captureDevice: AVCaptureDevice!
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var metadataOutputRef: AVCaptureMetadataOutput?
-    private let videoDataOutput = AVCaptureVideoDataOutput()
     private var cameraPosition: AVCaptureDevice.Position = .back
 
     // MARK: - Flutter
@@ -54,11 +53,6 @@ class CameraKitPlusView: NSObject,
     // MARK: - Macro
     private var isMacroEnabled: Bool = false
 
-    // MARK: - Vision
-    private let visionQueue = DispatchQueue(label: "vision.barcode.queue", qos: .userInitiated)
-    private var frameIndex = 0
-    private var visionStrideN = 3 // run Vision every Nth frame
-
     // MARK: - Dedup / Debounce
     private var lastPayload: String?
     private var lastTypeCode: Int?
@@ -73,6 +67,14 @@ class CameraKitPlusView: NSObject,
     ]
     private var roiWidthPercent: CGFloat = 0.6
     private var roiHeightPercent: CGFloat = 0.4
+    /// 1080p / 20 fps for PDF417 BCBP; 720p / 15 fps otherwise.
+    private var highScanQuality = false
+    /// Gated printed-text OCR for Find/Search overlay chips (not Board).
+    private var textAssistEnabled = false
+    private var sessionStartedAt: CFAbsoluteTime = 0
+    private var lastTextAssistTs: CFAbsoluteTime = 0
+    private var didEmitBarcode = false
+    private var isProcessingTextAssist = false
 
     // MARK: - Photo output
     private let photoOutput: AVCapturePhotoOutput = {
@@ -97,9 +99,16 @@ class CameraKitPlusView: NSObject,
         self.viewId = viewId
         super.init()
 
-        if let myArgs = args as? [String: Any],
-           let focus = myArgs["focusRequired"] as? Bool {
-            self.focusRequired = focus
+        if let myArgs = args as? [String: Any] {
+            if let focus = myArgs["focusRequired"] as? Bool {
+                self.focusRequired = focus
+            }
+            if let quality = myArgs["scanQuality"] as? String {
+                self.highScanQuality = (quality == "high")
+            }
+            if let assist = myArgs["textAssist"] as? Bool {
+                self.textAssistEnabled = assist
+            }
         }
 
         container.onLayoutSubviews = { [weak self] in
@@ -145,6 +154,9 @@ class CameraKitPlusView: NSObject,
         case "changeFlashMode":
             let mode = (args?["flashModeID"] as? Int) ?? 0
             changeFlashMode(modeID: mode, result: result)
+
+        case "getFlashMode":
+            result(self.captureDevice?.isTorchActive ?? false)
 
         case "switchCamera":
             let cameraID = (args?["cameraID"] as? Int) ?? 0
@@ -292,7 +304,8 @@ class CameraKitPlusView: NSObject,
 
     // MARK: - Setup
     private func setupAVCapture_bootstrapDevice() {
-        captureSession.sessionPreset = .hd1920x1080
+        // 720p is enough for PDF417/QR boarding passes and avoids 4K ISP heat.
+        captureSession.sessionPreset = .hd1280x720
         if cameraPosition == .back, let dev = bestBackCamera() {
             captureDevice = dev
         } else if let dev = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: cameraPosition) {
@@ -314,9 +327,15 @@ class CameraKitPlusView: NSObject,
 
         captureSession.beginConfiguration()
 
-        if captureSession.canSetSessionPreset(.hd4K3840x2160) {
-            captureSession.sessionPreset = .hd4K3840x2160
-        } else {
+        if highScanQuality {
+            if captureSession.canSetSessionPreset(.hd1920x1080) {
+                captureSession.sessionPreset = .hd1920x1080
+            } else if captureSession.canSetSessionPreset(.hd1280x720) {
+                captureSession.sessionPreset = .hd1280x720
+            }
+        } else if captureSession.canSetSessionPreset(.hd1280x720) {
+            captureSession.sessionPreset = .hd1280x720
+        } else if captureSession.canSetSessionPreset(.hd1920x1080) {
             captureSession.sessionPreset = .hd1920x1080
         }
 
@@ -348,31 +367,32 @@ class CameraKitPlusView: NSObject,
             self.metadataOutputRef = metadataOutput
         }
 
-        videoDataOutput.alwaysDiscardsLateVideoFrames = true
-        videoDataOutput.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        ]
-        if captureSession.canAddOutput(videoDataOutput) {
-            captureSession.addOutput(videoDataOutput)
-            videoDataOutput.setSampleBufferDelegate(self, queue: visionQueue)
+        if textAssistEnabled {
+            let videoOut = AVCaptureVideoDataOutput()
+            videoOut.alwaysDiscardsLateVideoFrames = true
+            videoOut.setSampleBufferDelegate(self, queue: DispatchQueue(label: "camera_kit_plus.textAssist"))
+            if captureSession.canAddOutput(videoOut) {
+                captureSession.addOutput(videoOut)
+            }
         }
+
+        // Hardware AVMetadata is enough for BCBP/QR. A second Vision barcode
+        // pass on video frames was the main NPU heat on Board.
 
         do {
             try device.lockForConfiguration()
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
             if device.isLowLightBoostSupported { device.automaticallyEnablesLowLightBoostWhenAvailable = true }
-
-            if device.activeFormat.videoSupportedFrameRateRanges.contains(where: { $0.minFrameDuration <= CMTime(value: 1, timescale: 15) }) {
-                device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 15)
-                device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
-            }
+            Self.applyScanFrameRate(on: device, fps: highScanQuality ? 20 : 15)
             device.unlockForConfiguration()
         } catch {
             print("Device configuration error: \(error)")
         }
 
         captureSession.commitConfiguration()
+        sessionStartedAt = CFAbsoluteTimeGetCurrent()
+        didEmitBarcode = false
         applyFocusConfiguration()
         ensurePreviewLayer()
         startSession()
@@ -742,40 +762,6 @@ class CameraKitPlusView: NSObject,
         emitBarcodeIfNew(value: value, typeCode: typeCode, cornerPoints: points)
     }
 
-    // MARK: - Vision Delegate (robust path)
-    func captureOutput(_ output: AVCaptureOutput,
-                       didOutput sampleBuffer: CMSampleBuffer,
-                       from connection: AVCaptureConnection) {
-        frameIndex += 1
-        if frameIndex % visionStrideN != 0 { return }
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
-        let req = VNDetectBarcodesRequest { [weak self] request, _ in
-            guard let self = self else { return }
-            guard let results = request.results as? [VNBarcodeObservation], !results.isEmpty else { return }
-
-            // pick highest confidence
-            guard let best = results.sorted(by: { $0.confidence > $1.confidence }).first,
-                  let value = best.payloadStringValue else { return }
-
-            let typeCode = self.intBarcodeCode(for: best.symbology)
-
-            // Vision has normalized boundingBox (no cornerPoints API).
-            let bb = best.boundingBox
-            let points = [
-                CKPPoint(x: Double(bb.minX), y: Double(bb.minY)),
-                CKPPoint(x: Double(bb.maxX), y: Double(bb.minY)),
-                CKPPoint(x: Double(bb.maxX), y: Double(bb.maxY)),
-                CKPPoint(x: Double(bb.minX), y: Double(bb.maxY))
-            ]
-            self.emitBarcodeIfNew(value: value, typeCode: typeCode, cornerPoints: points)
-        }
-        req.symbologies = visionSymbologies(for: wantedAVTypes)
-
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
-        do { try handler.perform([req]) } catch { /* ignore */ }
-    }
-
     // MARK: - Emit helper (debounce + to Flutter)
     private func emitBarcodeIfNew(value: String,
                                   typeCode: Int,
@@ -785,6 +771,7 @@ class CameraKitPlusView: NSObject,
         lastPayload = value
         lastTypeCode = typeCode
         lastEmitTs = now
+        didEmitBarcode = true
 
         DispatchQueue.main.async {
             self.channel?.invokeMethod("onBarcodeScanned", arguments: value)
@@ -796,9 +783,60 @@ class CameraKitPlusView: NSObject,
         }
     }
 
+    /// Caps live barcode capture; min and max frame duration must match.
+    private static func applyScanFrameRate(on device: AVCaptureDevice, fps: Int32) {
+        let duration = CMTime(value: 1, timescale: fps)
+        guard device.activeFormat.videoSupportedFrameRateRanges.contains(where: {
+            $0.minFrameDuration <= duration && $0.maxFrameDuration >= duration
+        }) else { return }
+        device.activeVideoMinFrameDuration = duration
+        device.activeVideoMaxFrameDuration = duration
+    }
+
+    public func captureOutput(_ output: AVCaptureOutput,
+                              didOutput sampleBuffer: CMSampleBuffer,
+                              from connection: AVCaptureConnection) {
+        guard textAssistEnabled, !didEmitBarcode, !isProcessingTextAssist else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - sessionStartedAt >= 0.8 else { return }
+        guard now - lastTextAssistTs >= 0.5 else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastTextAssistTs = now
+        isProcessingTextAssist = true
+        let request = VNRecognizeTextRequest { [weak self] request, _ in
+            defer { self?.isProcessingTextAssist = false }
+            guard let self = self, !self.didEmitBarcode else { return }
+            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+            let lines = observations.compactMap { $0.topCandidates(1).first?.string }
+            let text = lines.joined(separator: "\n")
+            guard !text.isEmpty else { return }
+            DispatchQueue.main.async {
+                self.channel?.invokeMethod("onTextAssist", arguments: text)
+            }
+        }
+        request.recognitionLevel = .fast
+        request.usesLanguageCorrection = false
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        DispatchQueue.global(qos: .utility).async {
+            try? handler.perform([request])
+        }
+    }
+
     // MARK: - Dispose
     func dispose() {
         captureSession.stopRunning()
+        captureSession.beginConfiguration()
+        for input in captureSession.inputs {
+            captureSession.removeInput(input)
+        }
+        for output in captureSession.outputs {
+            captureSession.removeOutput(output)
+        }
+        captureSession.commitConfiguration()
+        previewLayer?.removeFromSuperlayer()
+        previewLayer = nil
+        metadataOutputRef = nil
+        captureDevice = nil
         channel?.setMethodCallHandler(nil)
         channel = nil
     }
@@ -820,44 +858,5 @@ class CameraKitPlusView: NSObject,
         case .qr:                   return 256
         default:                    return 0
         }
-    }
-
-    func intBarcodeCode(for sym: VNBarcodeSymbology) -> Int {
-        switch sym {
-        case .aztec:        return 4096
-        case .code39, .code39Checksum, .code39FullASCII, .code39FullASCIIChecksum: return 2
-        case .code93:       return 4
-        case .code128:      return 1
-        case .dataMatrix:   return 16
-        case .ean8:         return 64
-        case .ean13:        return 32
-        case .I2of5:        return 128   // Vision name for Interleaved 2 of 5
-        case .ITF14:        return 128
-        case .pdf417:       return 2048
-        case .qr:           return 256
-        case .upce:         return 0     // map if needed
-        default:            return 0
-        }
-    }
-
-    private func visionSymbologies(for avTypes: [AVMetadataObject.ObjectType]) -> [VNBarcodeSymbology] {
-        var set = Set<VNBarcodeSymbology>()
-        for av in avTypes {
-            switch av {
-            case .aztec:                set.insert(.aztec)
-            case .code39, .code39Mod43: set.insert(.code39)
-            case .code93:               set.insert(.code93)
-            case .code128:              set.insert(.code128)
-            case .dataMatrix:           set.insert(.dataMatrix)
-            case .ean8:                 set.insert(.ean8)
-            case .ean13:                set.insert(.ean13)
-            case .interleaved2of5:      set.insert(.I2of5)   // correct Vision case
-            case .itf14:                set.insert(.ITF14)
-            case .pdf417:               set.insert(.pdf417)
-            case .qr:                   set.insert(.qr)
-            default: break
-            }
-        }
-        return Array(set)
     }
 }
