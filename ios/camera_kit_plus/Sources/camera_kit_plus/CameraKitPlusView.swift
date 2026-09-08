@@ -363,10 +363,6 @@ class CameraKitPlusView: NSObject,
             return
         }
 
-        if captureSession.canAddOutput(photoOutput) {
-            captureSession.addOutput(photoOutput)
-        }
-
         let metadataOutput = AVCaptureMetadataOutput()
         if captureSession.canAddOutput(metadataOutput) {
             captureSession.addOutput(metadataOutput)
@@ -436,7 +432,20 @@ class CameraKitPlusView: NSObject,
     }
 
     // MARK: - Photo
+    /// Adds still-photo output only when a capture is requested so barcode sessions
+    /// do not keep a still pipeline running all day.
+    private func ensurePhotoOutput() {
+        if captureSession.outputs.contains(where: { $0 === photoOutput }) { return }
+        captureSession.beginConfiguration()
+        if captureSession.canAddOutput(photoOutput) {
+            captureSession.addOutput(photoOutput)
+        }
+        captureSession.commitConfiguration()
+    }
+
+    /// Captures a JPEG to a temp file. Photo output is attached on first capture.
     func captureImage(result: @escaping FlutterResult) {
+        ensurePhotoOutput()
         self.imageCaptureResult = result
         let settings = AVCapturePhotoSettings()
         if photoOutput.supportedFlashModes.contains(.auto) {

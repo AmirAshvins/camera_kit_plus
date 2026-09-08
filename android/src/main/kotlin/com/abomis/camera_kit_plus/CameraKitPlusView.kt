@@ -12,6 +12,7 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -191,6 +192,10 @@ class CameraKitPlusView(
             } else {
                 ext.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             }
+            // Cap ML Kit analysis well below ~30 fps so Board/Find stay cooler at 1080p.
+            barcodeFpsRange()?.let { range ->
+                ext.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+            }
         }
 
         val targetSize = if (highScanQuality) Size(1920, 1080) else Size(1280, 720)
@@ -204,20 +209,25 @@ class CameraKitPlusView(
         extBuilder(analysisBuilder)
         imageAnalysis = analysisBuilder.build().also { it.setAnalyzer(cameraExecutor, ::processImageProxy) }
 
-        val captureBuilder = ImageCapture.Builder()
-            .setTargetResolution(targetSize)
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-        extBuilder(captureBuilder)
-        imageCapture = captureBuilder.build()
+        // Still capture is bound only from takePicture so Board/Find skip that pipeline.
 
         unbindOwnUseCases()
         try {
-            camera = cameraSelector?.let {
+            val selector = cameraSelector ?: return
+            val capture = imageCapture
+            camera = if (capture != null) {
                 provider.bindToLifecycle(
                     lifecycleOwner,
-                    it,
+                    selector,
                     preview,
-                    imageCapture,
+                    capture,
+                    imageAnalysis
+                )
+            } else {
+                provider.bindToLifecycle(
+                    lifecycleOwner,
+                    selector,
+                    preview,
                     imageAnalysis
                 )
             }
@@ -293,7 +303,56 @@ class CameraKitPlusView(
         camera = null
     }
 
+    /** Prefer 15 fps so ML Kit is not fed ~30 frames at 1080p. */
+    private fun barcodeFpsRange(): Range<Int>? {
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return null
+        val wantedFacing =
+            if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) {
+                CameraCharacteristics.LENS_FACING_FRONT
+            } else {
+                CameraCharacteristics.LENS_FACING_BACK
+            }
+        for (id in manager.cameraIdList) {
+            val chars = manager.getCameraCharacteristics(id)
+            if (chars.get(CameraCharacteristics.LENS_FACING) != wantedFacing) continue
+            val available = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?: continue
+            available.firstOrNull { it.lower == 15 && it.upper == 15 }?.let { return it }
+            // Some Camera2 HALs report fps * 1000 (15000 = 15 fps).
+            available.firstOrNull { it.lower == 15000 && it.upper == 15000 }?.let { return it }
+            available.firstOrNull { it.lower == 12 && it.upper == 20 }?.let { return it }
+            available.firstOrNull { it.lower == 12000 && it.upper == 20000 }?.let { return it }
+            available.firstOrNull { it.lower <= 15 && it.upper >= 15 && it.upper <= 20 }?.let { return it }
+        }
+        return null
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun ensureImageCaptureBound(lifecycleOwner: LifecycleOwner) {
+        if (imageCapture != null && camera != null) return
+        if (imageCapture == null) {
+            val targetSize = if (highScanQuality) Size(1920, 1080) else Size(1280, 720)
+            val captureBuilder = ImageCapture.Builder()
+                .setTargetResolution(targetSize)
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            barcodeFpsRange()?.let { range ->
+                Camera2Interop.Extender(captureBuilder)
+                    .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+            }
+            imageCapture = captureBuilder.build()
+        }
+        bindUseCases(lifecycleOwner)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
     private fun takePicture(result: MethodChannel.Result) {
+        val activity = getActivity(context) as? LifecycleOwner
+        if (activity == null) {
+            result.error("IMAGE_CAPTURE_UNAVAILABLE", "No activity for ImageCapture", null)
+            return
+        }
+        ensureImageCaptureBound(activity)
         val capture = imageCapture
         if (capture == null) {
             result.error("IMAGE_CAPTURE_UNAVAILABLE", "ImageCapture not ready", null)
