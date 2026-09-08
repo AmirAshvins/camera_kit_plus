@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Point
 import android.hardware.camera2.CameraCharacteristics
@@ -250,28 +251,25 @@ class CameraKitPlusView(
 
     private fun ensureBarcodeScanner() {
         if (::barcodeScanner.isInitialized) return
-        barcodeScanner = BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder().setBarcodeFormats(
+        val options = BarcodeScannerOptions.Builder()
+        if (highScanQuality) {
+            options.setBarcodeFormats(
+                Barcode.FORMAT_PDF417,
+                Barcode.FORMAT_QR_CODE,
+            )
+        } else {
+            options.setBarcodeFormats(
                 Barcode.FORMAT_PDF417,
                 Barcode.FORMAT_QR_CODE,
                 Barcode.FORMAT_AZTEC,
                 Barcode.FORMAT_DATA_MATRIX,
-                Barcode.FORMAT_CODE_128
-            ).build()
-        )
+                Barcode.FORMAT_CODE_128,
+            )
+        }
+        barcodeScanner = BarcodeScanning.getClient(options.build())
     }
 
-    private fun maybeTextAssist(image: InputImage, imageProxy: ImageProxy) {
-        val now = System.currentTimeMillis()
-        val shouldRun = textAssistEnabled &&
-            !didEmitBarcode &&
-            now - sessionStartedAtMs >= 800L &&
-            now - lastTextAssistMs >= 500L
-        if (!shouldRun) {
-            imageProxy.close()
-            return
-        }
-        lastTextAssistMs = now
+    private fun maybeTextAssist(image: InputImage) {
         if (textScanner == null) {
             textScanner = com.google.mlkit.vision.text.TextRecognition.getClient(
                 com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS
@@ -284,7 +282,6 @@ class CameraKitPlusView(
                     invokeOnMain("onTextAssist", content)
                 }
             }
-            .addOnCompleteListener { imageProxy.close() }
     }
 
     private fun unbindOwnUseCases() {
@@ -294,7 +291,6 @@ class CameraKitPlusView(
             provider.unbind(*bound.toTypedArray())
         }
         camera = null
-    }
     }
 
     private fun takePicture(result: MethodChannel.Result) {
@@ -345,7 +341,29 @@ class CameraKitPlusView(
             }
             .addOnFailureListener { Log.e("Barcode", "Failed to scan barcode", it) }
             .addOnCompleteListener {
-                maybeTextAssist(image, imageProxy)
+                // Close the proxy immediately so barcode analysis is never
+                // blocked by printed-text OCR on Find/Search.
+                val now = System.currentTimeMillis()
+                val shouldOcr = textAssistEnabled &&
+                    !didEmitBarcode &&
+                    now - sessionStartedAtMs >= 400L &&
+                    now - lastTextAssistMs >= 330L
+                if (!shouldOcr) {
+                    imageProxy.close()
+                    return@addOnCompleteListener
+                }
+                lastTextAssistMs = now
+                val rotation = imageProxy.imageInfo.rotationDegrees
+                val bitmap: Bitmap? = try {
+                    imageProxy.toBitmap()
+                } catch (e: Exception) {
+                    Log.e("Barcode", "textAssist bitmap failed", e)
+                    null
+                }
+                imageProxy.close()
+                if (bitmap != null) {
+                    maybeTextAssist(InputImage.fromBitmap(bitmap, rotation))
+                }
             }
     }
 

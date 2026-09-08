@@ -67,7 +67,7 @@ class CameraKitPlusView: NSObject,
     ]
     private var roiWidthPercent: CGFloat = 0.6
     private var roiHeightPercent: CGFloat = 0.4
-    /// 1080p / 20 fps for PDF417 BCBP; 720p / 15 fps otherwise.
+    /// 1080p / 24 fps for PDF417 BCBP; 720p / 15 fps otherwise.
     private var highScanQuality = false
     /// Gated printed-text OCR for Find/Search overlay chips (not Board).
     private var textAssistEnabled = false
@@ -105,6 +105,13 @@ class CameraKitPlusView: NSObject,
             }
             if let quality = myArgs["scanQuality"] as? String {
                 self.highScanQuality = (quality == "high")
+            }
+            if self.highScanQuality {
+                // Match the drawn 90% × 63% frame so a landscape PDF417 is
+                // not clipped by the default 60% × 40% metadata ROI.
+                self.roiWidthPercent = 0.90
+                self.roiHeightPercent = 0.55
+                self.wantedAVTypes = [.pdf417, .qr]
             }
             if let assist = myArgs["textAssist"] as? Bool {
                 self.textAssistEnabled = assist
@@ -314,8 +321,10 @@ class CameraKitPlusView: NSObject,
     }
 
     private func bestBackCamera() -> AVCaptureDevice? {
+        // Wide-angle first: ultra-wide shrinks PDF417 in the frame and
+        // makes AVMetadata first-hit feel stuck.
         let discovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInUltraWideCamera, .builtInTripleCamera, .builtInDualWideCamera, .builtInWideAngleCamera],
+            deviceTypes: [.builtInWideAngleCamera, .builtInDualCamera, .builtInTripleCamera, .builtInDualWideCamera],
             mediaType: .video,
             position: .back
         )
@@ -384,7 +393,7 @@ class CameraKitPlusView: NSObject,
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
             if device.isLowLightBoostSupported { device.automaticallyEnablesLowLightBoostWhenAvailable = true }
-            Self.applyScanFrameRate(on: device, fps: highScanQuality ? 20 : 15)
+            Self.applyScanFrameRate(on: device, fps: highScanQuality ? 24 : 15)
             device.unlockForConfiguration()
         } catch {
             print("Device configuration error: \(error)")
@@ -798,8 +807,8 @@ class CameraKitPlusView: NSObject,
                               from connection: AVCaptureConnection) {
         guard textAssistEnabled, !didEmitBarcode, !isProcessingTextAssist else { return }
         let now = CFAbsoluteTimeGetCurrent()
-        guard now - sessionStartedAt >= 0.8 else { return }
-        guard now - lastTextAssistTs >= 0.5 else { return }
+        guard now - sessionStartedAt >= 0.4 else { return }
+        guard now - lastTextAssistTs >= 0.33 else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastTextAssistTs = now
         isProcessingTextAssist = true
