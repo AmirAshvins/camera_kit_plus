@@ -23,6 +23,8 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     //    var hasBarcodeReader:Bool!
     var imageSavePath:String!
     var isCameraVisible:Bool! = true
+    /// Host pause must win over delayed session start.
+    private var isSessionPaused = false
     var initCameraFinished:Bool! = false
     var isFillScale:Bool!
     var flashMode:AVCaptureDevice.FlashMode!
@@ -120,6 +122,10 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     
     deinit {
         NotificationCenter.default.removeObserver(self)
+        isSessionPaused = true
+        if session.isRunning {
+            session.stopRunning()
+        }
     }
 
     func view() -> UIView {
@@ -275,6 +281,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
     /// Stops capture, tears down session I/O, and clears the method channel.
     private func disposeNative() {
+        isSessionPaused = true
         stopCamera()
         liveOcrCycleIndex = 0
         isProcessingOcr = false
@@ -463,7 +470,10 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     }
 
     func startSession(isFirst: Bool) {
-        DispatchQueue.main.async {
+        // Weak self so a zero-size retry cannot keep this view alive after
+        // Flutter tears the platform view down (fast modal close).
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isSessionPaused else { return }
             // Ensure view is created
             if self.previewView == nil {
                  // Should not happen if view() was called, but safety check
@@ -488,19 +498,20 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                     }
                 }
                 
-                self.sessionQueue.async {
+                self.sessionQueue.async { [weak self] in
+                    guard let self, !self.isSessionPaused else { return }
                     if !self.session.isRunning {
                         self.session.startRunning()
                     }
                     if isFirst == true {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            self.initCameraFinished = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                            self?.initCameraFinished = true
                         }
                     }
                 }
             } else {
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                    self.startSession(isFirst: isFirst)
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.startSession(isFirst: isFirst)
                 }
             }
         }
@@ -561,19 +572,18 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     }
 
     func pauseCamera() {
-        // if self.initCameraFinished == true { // Loosen check
-            self.stopCamera()
-            self.isCameraVisible = false
-        // }
+        isSessionPaused = true
+        self.stopCamera()
+        self.isCameraVisible = false
     }
 
     func resumeCamera() {
-        // if  self.initCameraFinished == true { // Loosen check, but mostly rely on session state
-            self.isCameraVisible = true
-            sessionQueue.async {
-                if !self.session.isRunning { self.session.startRunning() }
-            }
-        // }
+        isSessionPaused = false
+        self.isCameraVisible = true
+        sessionQueue.async {
+            guard !self.isSessionPaused else { return }
+            if !self.session.isRunning { self.session.startRunning() }
+        }
     }
 
     func stopCamera(){

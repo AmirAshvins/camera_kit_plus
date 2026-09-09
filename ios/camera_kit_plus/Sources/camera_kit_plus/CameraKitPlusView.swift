@@ -75,6 +75,8 @@ class CameraKitPlusView: NSObject,
     private var lastTextAssistTs: CFAbsoluteTime = 0
     private var didEmitBarcode = false
     private var isProcessingTextAssist = false
+    /// Host pause must win over delayed [startSession] retries.
+    private var isSessionPaused = false
 
     // MARK: - Photo output
     private let photoOutput: AVCapturePhotoOutput = {
@@ -146,6 +148,10 @@ class CameraKitPlusView: NSObject,
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        isSessionPaused = true
+        if captureSession.isRunning {
+            captureSession.stopRunning()
+        }
     }
 
     func view() -> UIView { _view }
@@ -405,9 +411,14 @@ class CameraKitPlusView: NSObject,
 
     // MARK: - Session control
     private func startSession() {
-        DispatchQueue.main.async {
+        // Weak self so a zero-size retry cannot keep this view alive after
+        // Flutter tears the platform view down (fast modal close).
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isSessionPaused else { return }
             guard self._view.bounds.width > 0, self._view.bounds.height > 0 else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.startSession() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.startSession()
+                }
                 return
             }
             if !self.permissionGranted() {
@@ -422,11 +433,13 @@ class CameraKitPlusView: NSObject,
     }
 
     func pauseCamera(result: @escaping FlutterResult) {
+        isSessionPaused = true
         captureSession.stopRunning()
         result(true)
     }
 
     func resumeCamera(result: @escaping FlutterResult) {
+        isSessionPaused = false
         if !captureSession.isRunning { captureSession.startRunning() }
         result(true)
     }
@@ -842,6 +855,7 @@ class CameraKitPlusView: NSObject,
 
     // MARK: - Dispose
     func dispose() {
+        isSessionPaused = true
         captureSession.stopRunning()
         captureSession.beginConfiguration()
         for input in captureSession.inputs {

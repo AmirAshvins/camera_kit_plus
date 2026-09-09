@@ -53,6 +53,10 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
   bool isVisible = false;
   double zoom = 1;
 
+  /// Set in [dispose] so a late [onPlatformViewCreated] cannot treat this
+  /// State as a live preview (fast modal close before the platform view binds).
+  bool _released = false;
+
   /// Per-instance key — shared const keys break [VisibilityDetector] tracking
   /// when multiple scanners are mounted (mode switches, dialogs, covered routes).
   late final Key _visibilityKey =
@@ -148,15 +152,17 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_released) return;
     if (state == AppLifecycleState.resumed && isVisible) {
-      controller.resumeCamera();
+      controller.resumeCamera(host: false);
     } else {
-      controller.pauseCamera();
+      controller.pauseCamera(host: false);
     }
   }
 
   @override
   void dispose() {
+    _released = true;
     WidgetsBinding.instance.removeObserver(this);
     // VisibilityDetector often skips fraction=0 on dispose; always stop capture
     // before clearing the channel — including external (host-owned) controllers.
@@ -177,7 +183,14 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
   }
 
   void _onPlatformViewCreated(int id) {
-    controller.bindToView(id, onEvent: _methodCallHandler);
+    // Bind even after dispose so disposeView has a channel to stop native
+    // capture; cameraKitPlusBindPlatformView then tears the session down.
+    unawaited(cameraKitPlusBindPlatformView(
+      controller: controller,
+      viewId: id,
+      onEvent: _methodCallHandler,
+      released: _released,
+    ));
   }
 
   Future<dynamic> _methodCallHandler(MethodCall methodCall) async {
@@ -210,13 +223,17 @@ class _CameraKitOcrPlusViewState extends State<CameraKitOcrPlusView>
   }
 
   void _onVisibilityChanged(VisibilityInfo info) {
-    final bool newVisibility = info.visibleFraction > 0;
+    if (_released) return;
+    final bool newVisibility = cameraKitPlusAllowsAutoResume(
+      hostPaused: controller.hostPaused,
+      visibleFraction: info.visibleFraction,
+    );
     if (newVisibility != isVisible) {
       isVisible = newVisibility;
       if (isVisible) {
-        controller.resumeCamera();
+        controller.resumeCamera(host: false);
       } else {
-        controller.pauseCamera();
+        controller.pauseCamera(host: false);
       }
     }
   }

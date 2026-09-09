@@ -2,6 +2,40 @@ import 'package:flutter/services.dart';
 
 import 'camera_kit_plus.dart';
 
+/// Whether a visibility/lifecycle callback may resume capture.
+///
+/// Host [CameraKitPlusController.pauseCamera] latches [hostPaused] so a
+/// covered platform view that still reports [visibleFraction] > 0 cannot
+/// restart the session under another route.
+bool cameraKitPlusAllowsAutoResume({
+  required bool hostPaused,
+  required double visibleFraction,
+}) {
+  return !hostPaused && visibleFraction >= 0.5;
+}
+
+/// Binds [controller] to [viewId], then stops native capture if the Dart
+/// widget already disposed.
+///
+/// [UiKitView] / [AndroidView] can fire `onPlatformViewCreated` after
+/// [State.dispose]. Binding is still required so [CameraKitPlusController.disposeView]
+/// has a method channel; without it a late native session stays running with
+/// no widget (iPhone camera indicator stays on).
+///
+/// [onEvent] is forwarded to [CameraKitPlusController.bindToView].
+/// [released] is true when the Dart [State] has already been disposed.
+Future<void> cameraKitPlusBindPlatformView({
+  required CameraKitPlusController controller,
+  required int viewId,
+  Future<dynamic> Function(MethodCall call)? onEvent,
+  required bool released,
+}) async {
+  controller.bindToView(viewId, onEvent: onEvent);
+  if (released) {
+    await controller.disposeView();
+  }
+}
+
 /// Controls a single camera platform view after [bindToView].
 ///
 /// View commands (pause/flash/zoom/…) go to `camera_kit_plus/view_$id`.
@@ -10,6 +44,7 @@ class CameraKitPlusController extends CameraKitPlus {
   MethodChannel? _viewChannel;
   int? _boundViewId;
   Future<dynamic> Function(MethodCall call)? _eventHandler;
+  bool _hostPaused = false;
 
   /// Host hook when a platform view binds (scan session started).
   static void Function(CameraKitPlusController controller)? onViewBound;
@@ -19,6 +54,9 @@ class CameraKitPlusController extends CameraKitPlus {
 
   /// Whether this controller is bound to a native platform view.
   bool get isBound => _viewChannel != null;
+
+  /// Whether the host paused capture and visibility/lifecycle must not resume.
+  bool get hostPaused => _hostPaused;
 
   /// View id currently bound, if any.
   int? get boundViewId => _boundViewId;
@@ -34,6 +72,7 @@ class CameraKitPlusController extends CameraKitPlus {
     _eventHandler = onEvent;
     _viewChannel = MethodChannel('camera_kit_plus/view_$viewId');
     _viewChannel!.setMethodCallHandler(_eventHandler);
+    _hostPaused = false;
     onViewBound?.call(this);
   }
 
@@ -57,11 +96,23 @@ class CameraKitPlusController extends CameraKitPlus {
     return channel.invokeMethod<T>(method, args);
   }
 
-  Future<bool> pauseCamera() async {
+  /// Pauses native capture.
+  ///
+  /// When [host] is true (default), visibility and app-lifecycle callbacks
+  /// must not call [resumeCamera] until the host resumes. The plugin view
+  /// passes `host: false` so a hide/show cycle does not latch.
+  Future<bool> pauseCamera({bool host = true}) async {
+    if (host) _hostPaused = true;
     return await _invoke<bool>('pauseCamera') ?? false;
   }
 
-  Future<bool> resumeCamera() async {
+  /// Resumes native capture unless a host pause is still latched.
+  ///
+  /// Visibility/lifecycle must pass `host: false`, which no-ops while
+  /// [hostPaused] is true.
+  Future<bool> resumeCamera({bool host = true}) async {
+    if (!host && _hostPaused) return false;
+    if (host) _hostPaused = false;
     return await _invoke<bool>('resumeCamera') ?? false;
   }
 
@@ -120,6 +171,7 @@ class CameraKitPlusController extends CameraKitPlus {
   ///
   /// Safe to call when unbound (no-ops the invoke, still clears handlers).
   Future<void> disposeView() async {
+    _hostPaused = false;
     await _invoke<bool>('dispose');
     unbind();
   }

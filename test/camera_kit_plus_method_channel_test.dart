@@ -1,4 +1,8 @@
-import 'package:camera_kit_plus/camera_kit_plus_controller.dart';
+import 'package:camera_kit_plus/camera_kit_plus_controller.dart'
+    show
+        CameraKitPlusController,
+        cameraKitPlusAllowsAutoResume,
+        cameraKitPlusBindPlatformView;
 import 'package:camera_kit_plus/camera_kit_plus_method_channel.dart';
 import 'package:camera_kit_plus/enums.dart';
 import 'package:flutter/services.dart';
@@ -96,6 +100,34 @@ void main() {
       expect(await controller.pauseCamera(), isFalse);
     });
 
+    test('late platform-view create after widget dispose stops native capture',
+        () async {
+      // Mirrors CameraKitPlusView.dispose before onPlatformViewCreated:
+      // unbind (not bound yet), then a delayed create must still dispose.
+      controller.unbind();
+      expect(controller.isBound, isFalse);
+      calls.clear();
+      await cameraKitPlusBindPlatformView(
+        controller: controller,
+        viewId: 7,
+        released: true,
+      );
+      expect(calls.map((c) => c.method), ['dispose']);
+      expect(controller.isBound, isFalse);
+    });
+
+    test('late platform-view create while mounted stays bound', () async {
+      controller.unbind();
+      calls.clear();
+      await cameraKitPlusBindPlatformView(
+        controller: controller,
+        viewId: 7,
+        released: false,
+      );
+      expect(calls, isEmpty);
+      expect(controller.isBound, isTrue);
+    });
+
     test('external host can pause then disposeView like widget teardown',
         () async {
       // Mirrors CameraKitPlusView.dispose for host-owned controllers: stop
@@ -104,6 +136,36 @@ void main() {
       await controller.disposeView();
       expect(calls.map((c) => c.method), ['pauseCamera', 'dispose']);
       expect(controller.isBound, isFalse);
+    });
+
+    test('visibility resume is ignored while host-paused', () async {
+      expect(await controller.pauseCamera(), isTrue);
+      expect(controller.hostPaused, isTrue);
+      calls.clear();
+      expect(await controller.resumeCamera(host: false), isFalse);
+      expect(calls, isEmpty);
+      expect(controller.hostPaused, isTrue);
+      expect(
+        cameraKitPlusAllowsAutoResume(
+          hostPaused: controller.hostPaused,
+          visibleFraction: 0.2,
+        ),
+        isFalse,
+      );
+      expect(
+        cameraKitPlusAllowsAutoResume(
+          hostPaused: true,
+          visibleFraction: 1,
+        ),
+        isFalse,
+      );
+      expect(
+        cameraKitPlusAllowsAutoResume(
+          hostPaused: false,
+          visibleFraction: 1,
+        ),
+        isTrue,
+      );
     });
   });
 }
