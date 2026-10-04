@@ -118,6 +118,15 @@ class CameraKitPlusView: NSObject,
             if let assist = myArgs["textAssist"] as? Bool {
                 self.textAssistEnabled = assist
             }
+            // Host ROI wins over the 60%×40% default and the high-quality
+            // frame, so a small modal well can scan the area the agent sees.
+            // Flutter's codec delivers the doubles as NSNumber.
+            if let w = (myArgs["roiWidth"] as? NSNumber)?.doubleValue {
+                self.roiWidthPercent = max(0.1, min(CGFloat(w), 1.0))
+            }
+            if let h = (myArgs["roiHeight"] as? NSNumber)?.doubleValue {
+                self.roiHeightPercent = max(0.1, min(CGFloat(h), 1.0))
+            }
         }
 
         container.onLayoutSubviews = { [weak self] in
@@ -305,7 +314,15 @@ class CameraKitPlusView: NSObject,
         let roiInView = CGRect(x: (viewRect.width - w) / 2.0,
                                y: (viewRect.height - h) / 2.0,
                                width: w, height: h)
-        mo.rectOfInterest = pl.metadataOutputRectConverted(fromLayerRect: roiInView)
+        let converted = pl.metadataOutputRectConverted(fromLayerRect: roiInView)
+        // Conversion is CGRect.zero until the preview connection exists.
+        // Storing that disables every metadata hit. Keep the full picture
+        // until a later layout or the post-start refresh can replace it.
+        if converted.isNull || converted.isInfinite || converted.isEmpty {
+            mo.rectOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
+            return
+        }
+        mo.rectOfInterest = converted
     }
 
     @objc private func handleDeviceOrientationChange() {
@@ -429,6 +446,12 @@ class CameraKitPlusView: NSObject,
             if !self.captureSession.isRunning {
                 self.captureSession.startRunning()
             }
+            // The preview connection exists only after start. A modal well
+            // often does not lay out again, so recompute on the next turn
+            // instead of leaving the pre-start zero rect in place.
+            DispatchQueue.main.async { [weak self] in
+                self?.updateRectOfInterest()
+            }
         }
     }
 
@@ -441,6 +464,11 @@ class CameraKitPlusView: NSObject,
     func resumeCamera(result: @escaping FlutterResult) {
         isSessionPaused = false
         if !captureSession.isRunning { captureSession.startRunning() }
+        // Same post-start refresh as startSession: a visibility pause can
+        // resume after the preview connection exists and the well has a size.
+        DispatchQueue.main.async { [weak self] in
+            self?.updateRectOfInterest()
+        }
         result(true)
     }
 

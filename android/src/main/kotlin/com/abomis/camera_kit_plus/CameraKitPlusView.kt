@@ -43,6 +43,8 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
 import io.flutter.plugin.platform.PlatformView
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -378,6 +380,21 @@ class CameraKitPlusView(
         return null
     }
 
+    // Same JSON as iOS: value, ML Kit format int, corners. Format ints match
+    // Dart BarcodeType codes. cornerPoints is always an array because the
+    // Dart parser requires it.
+    private fun barcodeDataJson(barcode: Barcode): String {
+        val points = JSONArray()
+        barcode.cornerPoints?.forEach { p ->
+            points.put(JSONObject().put("x", p.x.toDouble()).put("y", p.y.toDouble()))
+        }
+        return JSONObject()
+            .put("value", barcode.rawValue)
+            .put("type", barcode.format)
+            .put("cornerPoints", points)
+            .toString()
+    }
+
     @OptIn(ExperimentalGetImage::class)
     private fun processImageProxy(imageProxy: ImageProxy) {
         if (imageProxy.image == null || !::barcodeScanner.isInitialized) {
@@ -387,16 +404,20 @@ class CameraKitPlusView(
         val image = InputImage.fromMediaImage(imageProxy.image!!, imageProxy.imageInfo.rotationDegrees)
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes ->
-                barcodes.firstNotNullOfOrNull { it.rawValue }?.let { value ->
-                    val now = System.currentTimeMillis()
-                    if (value == lastBarcodePayload && now - lastBarcodeEmitMs < barcodeDebounceMs) {
-                        return@addOnSuccessListener
-                    }
-                    lastBarcodePayload = value
-                    lastBarcodeEmitMs = now
-                    didEmitBarcode = true
-                    invokeOnMain("onBarcodeScanned", value)
+                val barcode = barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }
+                    ?: return@addOnSuccessListener
+                val value = barcode.rawValue ?: return@addOnSuccessListener
+                val now = System.currentTimeMillis()
+                if (value == lastBarcodePayload && now - lastBarcodeEmitMs < barcodeDebounceMs) {
+                    return@addOnSuccessListener
                 }
+                lastBarcodePayload = value
+                lastBarcodeEmitMs = now
+                didEmitBarcode = true
+                invokeOnMain("onBarcodeScanned", value)
+                // Typed payload matches iOS so Dart symbology filters run.
+                // Screens that only listen to onBarcodeDataRead otherwise drop the read.
+                invokeOnMain("onBarcodeDataScanned", barcodeDataJson(barcode))
             }
             .addOnFailureListener { Log.e("Barcode", "Failed to scan barcode", it) }
             .addOnCompleteListener {

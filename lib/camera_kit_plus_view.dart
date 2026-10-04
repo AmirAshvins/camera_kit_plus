@@ -35,6 +35,16 @@ class CameraKitPlusView extends StatefulWidget {
   /// `high` uses 1080p / ~20 fps for PDF417; anything else stays 720p / 15 fps.
   final String? scanQuality;
 
+  /// Fraction of the preview width passed to iOS as the metadata ROI (0.1–1).
+  ///
+  /// Null keeps the native default. Android ignores this and scans the full frame.
+  final double? roiWidth;
+
+  /// Fraction of the preview height passed to iOS as the metadata ROI (0.1–1).
+  ///
+  /// Null keeps the native default. Android ignores this and scans the full frame.
+  final double? roiHeight;
+
   /// When true, native runs gated printed-text OCR for overlay chips.
   final bool textAssist;
 
@@ -52,6 +62,8 @@ class CameraKitPlusView extends StatefulWidget {
     this.showZoomSlider = false,
     this.focusRequired = true,
     this.scanQuality,
+    this.roiWidth,
+    this.roiHeight,
     this.textAssist = false,
     this.onTextAssist,
   });
@@ -134,6 +146,8 @@ class _CameraKitPlusViewState extends State<CameraKitPlusView>
     final Map<String, dynamic> creationParams = <String, dynamic>{
       'focusRequired': widget.focusRequired,
       if (widget.scanQuality != null) 'scanQuality': widget.scanQuality,
+      if (widget.roiWidth != null) 'roiWidth': widget.roiWidth,
+      if (widget.roiHeight != null) 'roiHeight': widget.roiHeight,
       'textAssist': widget.textAssist,
     };
 
@@ -303,6 +317,6 @@ class CornerPoint {
   CornerPoint({required this.x, required this.y});
 
   /// Parses JSON `{x, y}`.
-  factory CornerPoint.fromJson(Map<String, dynamic> json) =>
-      CornerPoint(x: (json['x'] as num).toDouble(), y: (json['y'] as num).toDouble());
+  factory CornerPoint.fromJson(Map<String, dynamic> json) => CornerPoint(
+      x: (json['x'] as num).toDouble(), y: (json['y'] as num).toDouble());
 }
