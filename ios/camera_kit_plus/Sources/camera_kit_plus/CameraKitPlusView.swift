@@ -75,6 +75,18 @@ class CameraKitPlusView: NSObject,
     private var lastTextAssistTs: CFAbsoluteTime = 0
     private var didEmitBarcode = false
     private var isProcessingTextAssist = false
+    /// First barcode, held until one accurate OCR pass can read printed punctuation.
+    private var pendingConfirmation: PendingBarcodeRead?
+    /// True while that confirmation OCR request is in flight.
+    private var isConfirmingBarcode = false
+    private let confirmLock = NSLock()
+
+    /// Barcode payload waiting on the printed-name OCR frame.
+    private struct PendingBarcodeRead {
+        let value: String
+        let typeCode: Int
+        let cornerPoints: [CKPPoint]
+    }
     /// Host pause must win over delayed [startSession] retries.
     private var isSessionPaused = false
 
@@ -827,6 +839,13 @@ class CameraKitPlusView: NSObject,
                                   cornerPoints: [CKPPoint]) {
         let now = CFAbsoluteTimeGetCurrent()
         if value == lastPayload, typeCode == lastTypeCode, now - lastEmitTs < 0.5 { return }
+
+        // Find/Search need the printed name (P-Y, T'EST) before this payload.
+        // Board leaves textAssist off and still emits immediately.
+        if holdForPrintedName(PendingBarcodeRead(value: value, typeCode: typeCode, cornerPoints: cornerPoints)) {
+            return
+        }
+
         lastPayload = value
         lastTypeCode = typeCode
         lastEmitTs = now
@@ -839,6 +858,72 @@ class CameraKitPlusView: NSObject,
                let json = String(data: jsonData, encoding: .utf8) {
                 self.channel?.invokeMethod("onBarcodeDataScanned", arguments: json)
             }
+        }
+    }
+
+    /// Stashes the first barcode until confirmation OCR, or for half a second.
+    ///
+    /// Returns true when the caller must not emit yet. After the barcode has
+    /// already been delivered, returns false so later reads keep debouncing.
+    private func holdForPrintedName(_ pending: PendingBarcodeRead) -> Bool {
+        confirmLock.lock()
+        if !textAssistEnabled || didEmitBarcode {
+            confirmLock.unlock()
+            return false
+        }
+        let alreadyHeld = pendingConfirmation != nil || isConfirmingBarcode
+        if !alreadyHeld {
+            pendingConfirmation = pending
+        }
+        confirmLock.unlock()
+        if !alreadyHeld {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.emitStashedBarcodeIfStillWaiting()
+            }
+        }
+        return true
+    }
+
+    /// Delivers a held barcode when no video frame arrived to OCR.
+    private func emitStashedBarcodeIfStillWaiting() {
+        confirmLock.lock()
+        let pending = pendingConfirmation
+        let busy = isConfirmingBarcode || didEmitBarcode
+        if pending != nil && !busy {
+            pendingConfirmation = nil
+            isConfirmingBarcode = true
+        }
+        confirmLock.unlock()
+        if busy { return }
+        guard let held = pending else { return }
+        deliverConfirmedBarcode(held)
+    }
+
+    /// Sends the barcode after printed-name text (or after the wait expired).
+    private func deliverConfirmedBarcode(_ pending: PendingBarcodeRead) {
+        confirmLock.lock()
+        if didEmitBarcode {
+            isConfirmingBarcode = false
+            confirmLock.unlock()
+            return
+        }
+        didEmitBarcode = true
+        isConfirmingBarcode = false
+        pendingConfirmation = nil
+        lastPayload = pending.value
+        lastTypeCode = pending.typeCode
+        lastEmitTs = CFAbsoluteTimeGetCurrent()
+        confirmLock.unlock()
+
+        channel?.invokeMethod("onBarcodeScanned", arguments: pending.value)
+        let payload = CKPBarcodeData(
+            value: pending.value,
+            type: pending.typeCode,
+            cornerPoints: pending.cornerPoints
+        )
+        if let jsonData = try? JSONEncoder().encode(payload),
+           let json = String(data: jsonData, encoding: .utf8) {
+            channel?.invokeMethod("onBarcodeDataScanned", arguments: json)
         }
     }
 
@@ -855,7 +940,16 @@ class CameraKitPlusView: NSObject,
     public func captureOutput(_ output: AVCaptureOutput,
                               didOutput sampleBuffer: CMSampleBuffer,
                               from connection: AVCaptureConnection) {
-        guard textAssistEnabled, !didEmitBarcode, !isProcessingTextAssist else { return }
+        // IATA barcodes drop apostrophes and hyphens. Read the printed name
+        // on this frame before Dart accepts the scan, or the fields stay TEST/PY.
+        // Check the buffer first so a bad frame does not consume the held barcode.
+        if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+           let pending = takePendingConfirmation() {
+            recognizePrintedName(in: pixelBuffer, then: pending)
+            return
+        }
+
+        guard textAssistEnabled, !didEmitBarcode, !isConfirmingBarcode, !isProcessingTextAssist else { return }
         let now = CFAbsoluteTimeGetCurrent()
         guard now - sessionStartedAt >= 0.4 else { return }
         guard now - lastTextAssistTs >= 0.33 else { return }
@@ -865,9 +959,7 @@ class CameraKitPlusView: NSObject,
         let request = VNRecognizeTextRequest { [weak self] request, _ in
             defer { self?.isProcessingTextAssist = false }
             guard let self = self, !self.didEmitBarcode else { return }
-            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
-            let lines = observations.compactMap { $0.topCandidates(1).first?.string }
-            let text = lines.joined(separator: "\n")
+            let text = Self.recognizedLines(from: request)
             guard !text.isEmpty else { return }
             DispatchQueue.main.async {
                 self.channel?.invokeMethod("onTextAssist", arguments: text)
@@ -879,6 +971,51 @@ class CameraKitPlusView: NSObject,
         DispatchQueue.global(qos: .utility).async {
             try? handler.perform([request])
         }
+    }
+
+    /// Accurate OCR of the frame that contained the barcode, then the barcode itself.
+    ///
+    /// Language correction is off so Vision does not rewrite `T'EST` as `TEST`.
+    /// An empty or failed read still delivers the barcode so a plain name does not stall.
+    private func recognizePrintedName(in pixelBuffer: CVPixelBuffer, then pending: PendingBarcodeRead) {
+        let request = VNRecognizeTextRequest { [weak self] request, _ in
+            let text = Self.recognizedLines(from: request)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if !text.isEmpty {
+                    self.channel?.invokeMethod("onTextAssist", arguments: text)
+                }
+                self.deliverConfirmedBarcode(pending)
+            }
+        }
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try handler.perform([request])
+            } catch {
+                DispatchQueue.main.async {
+                    self?.deliverConfirmedBarcode(pending)
+                }
+            }
+        }
+    }
+
+    private static func recognizedLines(from request: VNRequest) -> String {
+        let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+        return observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+
+    /// Claims the held barcode so only one confirmation OCR runs.
+    private func takePendingConfirmation() -> PendingBarcodeRead? {
+        confirmLock.lock()
+        defer { confirmLock.unlock() }
+        guard textAssistEnabled, !didEmitBarcode, !isConfirmingBarcode,
+              let pending = pendingConfirmation else { return nil }
+        pendingConfirmation = nil
+        isConfirmingBarcode = true
+        return pending
     }
 
     // MARK: - Dispose

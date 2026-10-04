@@ -84,6 +84,8 @@ class CameraKitPlusView(
     private val sessionStartedAtMs = System.currentTimeMillis()
     private var lastTextAssistMs: Long = 0
     private var didEmitBarcode = false
+    /// True while the barcode frame's printed-name OCR is still running.
+    private var isConfirmingBarcode = false
 
     // ====== Zoom state / gestures ======
     private var scaleDetector: ScaleGestureDetector? = null
@@ -281,12 +283,16 @@ class CameraKitPlusView(
         barcodeScanner = BarcodeScanning.getClient(options.build())
     }
 
-    private fun maybeTextAssist(image: InputImage) {
+    private fun ensureTextScanner() {
         if (textScanner == null) {
             textScanner = com.google.mlkit.vision.text.TextRecognition.getClient(
                 com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS
             )
         }
+    }
+
+    private fun maybeTextAssist(image: InputImage) {
+        ensureTextScanner()
         textScanner!!.process(image)
             .addOnSuccessListener { result ->
                 val content = result.text.trim()
@@ -294,6 +300,37 @@ class CameraKitPlusView(
                     invokeOnMain("onTextAssist", content)
                 }
             }
+    }
+
+    /// Reads the printed name, then emits the barcode. Empty OCR still emits.
+    ///
+    /// IATA BCBP drops apostrophes and hyphens, so Find/Search must see the
+    /// printed line (`P-Y T'EST`) before the `TEST/PY` payload.
+    private fun recognizePrintedNameThenEmit(bitmap: Bitmap, rotation: Int, barcode: Barcode) {
+        ensureTextScanner()
+        textScanner!!.process(InputImage.fromBitmap(bitmap, rotation))
+            .addOnSuccessListener { result ->
+                val content = result.text.trim()
+                if (content.isNotEmpty() && !didEmitBarcode) {
+                    invokeOnMain("onTextAssist", content)
+                }
+            }
+            .addOnFailureListener { Log.e("Barcode", "confirmation textAssist failed", it) }
+            .addOnCompleteListener { emitBarcode(barcode) }
+    }
+
+    private fun emitBarcode(barcode: Barcode) {
+        val value = barcode.rawValue ?: return
+        // didEmitBarcode stops text OCR only. Later passengers still emit;
+        // the caller already debounced the same payload.
+        lastBarcodePayload = value
+        lastBarcodeEmitMs = System.currentTimeMillis()
+        didEmitBarcode = true
+        isConfirmingBarcode = false
+        invokeOnMain("onBarcodeScanned", value)
+        // Typed payload matches iOS so Dart symbology filters run.
+        // Screens that only listen to onBarcodeDataRead otherwise drop the read.
+        invokeOnMain("onBarcodeDataScanned", barcodeDataJson(barcode))
     }
 
     private fun unbindOwnUseCases() {
@@ -402,6 +439,8 @@ class CameraKitPlusView(
             return
         }
         val image = InputImage.fromMediaImage(imageProxy.image!!, imageProxy.imageInfo.rotationDegrees)
+        // Held only for this proxy. Find/Search OCR it before emitting.
+        val confirmBarcode = arrayOfNulls<Barcode>(1)
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes ->
                 val barcode = barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }
@@ -411,21 +450,40 @@ class CameraKitPlusView(
                 if (value == lastBarcodePayload && now - lastBarcodeEmitMs < barcodeDebounceMs) {
                     return@addOnSuccessListener
                 }
-                lastBarcodePayload = value
-                lastBarcodeEmitMs = now
-                didEmitBarcode = true
-                invokeOnMain("onBarcodeScanned", value)
-                // Typed payload matches iOS so Dart symbology filters run.
-                // Screens that only listen to onBarcodeDataRead otherwise drop the read.
-                invokeOnMain("onBarcodeDataScanned", barcodeDataJson(barcode))
+                if (isConfirmingBarcode) return@addOnSuccessListener
+                // Printed punctuation is not in the barcode. Read this frame first.
+                if (textAssistEnabled && !didEmitBarcode) {
+                    confirmBarcode[0] = barcode
+                    return@addOnSuccessListener
+                }
+                emitBarcode(barcode)
             }
             .addOnFailureListener { Log.e("Barcode", "Failed to scan barcode", it) }
             .addOnCompleteListener {
+                val pending = confirmBarcode[0]
+                if (pending != null && textAssistEnabled && !didEmitBarcode && !isConfirmingBarcode) {
+                    isConfirmingBarcode = true
+                    val rotation = imageProxy.imageInfo.rotationDegrees
+                    val bitmap: Bitmap? = try {
+                        imageProxy.toBitmap()
+                    } catch (e: Exception) {
+                        Log.e("Barcode", "confirmation bitmap failed", e)
+                        null
+                    }
+                    imageProxy.close()
+                    if (bitmap == null) {
+                        emitBarcode(pending)
+                    } else {
+                        recognizePrintedNameThenEmit(bitmap, rotation, pending)
+                    }
+                    return@addOnCompleteListener
+                }
                 // Close the proxy immediately so barcode analysis is never
                 // blocked by printed-text OCR on Find/Search.
                 val now = System.currentTimeMillis()
                 val shouldOcr = textAssistEnabled &&
                     !didEmitBarcode &&
+                    !isConfirmingBarcode &&
                     now - sessionStartedAtMs >= 400L &&
                     now - lastTextAssistMs >= 330L
                 if (!shouldOcr) {
