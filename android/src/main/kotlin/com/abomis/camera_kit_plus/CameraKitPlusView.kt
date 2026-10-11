@@ -295,11 +295,24 @@ class CameraKitPlusView(
         ensureTextScanner()
         textScanner!!.process(image)
             .addOnSuccessListener { result ->
-                val content = result.text.trim()
+                val content = printedLines(result)
                 if (content.isNotEmpty() && !didEmitBarcode) {
                     invokeOnMain("onTextAssist", content)
                 }
             }
+    }
+
+    /// One line per ML Kit line, with a single space between word elements.
+    ///
+    /// Elements are words. Joining them keeps `PY PEEWEE` when the model
+    /// split the name, and does not invent a space inside one element.
+    private fun printedLines(result: com.google.mlkit.vision.text.Text): String {
+        return result.textBlocks.joinToString("\n") { block ->
+            block.lines.joinToString("\n") { line ->
+                val words = line.elements.map { it.text.trim() }.filter { it.isNotEmpty() }
+                if (words.isEmpty()) line.text.trim() else words.joinToString(" ")
+            }
+        }.trim()
     }
 
     /// Reads the printed name, then emits the barcode. Empty OCR still emits.
@@ -310,9 +323,14 @@ class CameraKitPlusView(
         ensureTextScanner()
         textScanner!!.process(InputImage.fromBitmap(bitmap, rotation))
             .addOnSuccessListener { result ->
-                val content = result.text.trim()
+                val content = printedLines(result)
                 if (content.isNotEmpty() && !didEmitBarcode) {
-                    invokeOnMain("onTextAssist", content)
+                    // This frame decides name spaces. A fast read must not
+                    // outvote a one-word confirmation line.
+                    invokeOnMain(
+                        "onTextAssist",
+                        mapOf("text" to content, "confirmation" to true),
+                    )
                 }
             }
             .addOnFailureListener { Log.e("Barcode", "confirmation textAssist failed", it) }

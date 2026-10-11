@@ -51,6 +51,13 @@ class CameraKitPlusView extends StatefulWidget {
   /// Called with raw OCR text from [textAssist] (not a barcode).
   final void Function(String text)? onTextAssist;
 
+  /// Confirmation OCR captured on the same frame as the barcode.
+  ///
+  /// Name spaces are decided from this text. Earlier [onTextAssist] frames
+  /// do not replace it. When null, a confirmation payload falls back to
+  /// [onTextAssist].
+  final void Function(String text)? onConfirmationText;
+
   /// Creates a barcode scanner view.
   const CameraKitPlusView({
     super.key,
@@ -66,6 +73,7 @@ class CameraKitPlusView extends StatefulWidget {
     this.roiHeight,
     this.textAssist = false,
     this.onTextAssist,
+    this.onConfirmationText,
   });
 
   @override
@@ -227,7 +235,13 @@ class _CameraKitPlusViewState extends State<CameraKitPlusView>
         widget.onBarcodeRead?.call(methodCall.arguments.toString());
         break;
       case 'onTextAssist':
-        widget.onTextAssist?.call(methodCall.arguments.toString());
+        final assist = _textAssistArguments(methodCall.arguments);
+        if (assist.confirmation) {
+          final confirm = widget.onConfirmationText ?? widget.onTextAssist;
+          confirm?.call(assist.text);
+        } else if (assist.text.isNotEmpty) {
+          widget.onTextAssist?.call(assist.text);
+        }
         break;
       case 'onBarcodeDataScanned':
         final data =
@@ -255,6 +269,20 @@ class _CameraKitPlusViewState extends State<CameraKitPlusView>
         }
         break;
     }
+  }
+
+  /// Reads a text-assist payload.
+  ///
+  /// Live frames are a plain string. The confirmation frame is a map so Dart
+  /// can tell it from those earlier reads.
+  ({String text, bool confirmation}) _textAssistArguments(dynamic arguments) {
+    if (arguments is Map) {
+      return (
+        text: arguments['text']?.toString() ?? '',
+        confirmation: arguments['confirmation'] == true,
+      );
+    }
+    return (text: arguments?.toString() ?? '', confirmation: false);
   }
 
   void _onVisibilityChanged(VisibilityInfo info) {

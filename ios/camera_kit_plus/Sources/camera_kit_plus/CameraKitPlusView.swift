@@ -983,7 +983,12 @@ class CameraKitPlusView: NSObject,
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if !text.isEmpty {
-                    self.channel?.invokeMethod("onTextAssist", arguments: text)
+                    // This frame decides name spaces. Earlier fast reads must
+                    // not outvote a one-word confirmation line.
+                    self.channel?.invokeMethod(
+                        "onTextAssist",
+                        arguments: ["text": text, "confirmation": true]
+                    )
                 }
                 self.deliverConfirmedBarcode(pending)
             }
@@ -1004,7 +1009,135 @@ class CameraKitPlusView: NSObject,
 
     private static func recognizedLines(from request: VNRequest) -> String {
         let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
-        return observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        return observations.compactMap { observation -> String? in
+            guard let candidate = observation.topCandidates(1).first else { return nil }
+            return linePreservingWordGaps(candidate)
+        }.joined(separator: "\n")
+    }
+
+    /// Puts back a word space Vision omitted, without splitting one word.
+    ///
+    /// Language correction is off so `T'EST` is not rewritten as `TEST`. That
+    /// also drops the space in an all-caps name, so `PY PEEWEE` can arrive as
+    /// `PYPEEWEE`. A gap is a word space only when it is clearly wider than
+    /// the gaps inside the same line. An existing space is left as printed.
+    private static func linePreservingWordGaps(_ candidate: VNRecognizedText) -> String {
+        let raw = candidate.string
+        guard raw.count >= 2 else { return raw }
+        let chars = Array(raw)
+        var boxes = [CGRect?](repeating: nil, count: chars.count)
+        var anyBox = false
+        for i in chars.indices {
+            let start = raw.index(raw.startIndex, offsetBy: i)
+            let end = raw.index(after: start)
+            if let observation = try? candidate.boundingBox(for: start..<end) {
+                boxes[i] = observation.boundingBox
+                anyBox = true
+            }
+        }
+        guard anyBox else { return raw }
+
+        let horizontal = readingIsHorizontal(boxes)
+        let forward = readingIsForward(boxes, horizontal: horizontal)
+        var samples: [(index: Int, gap: CGFloat, width: CGFloat)] = []
+        var previousLetter: Int?
+        for i in chars.indices {
+            guard chars[i].isLetter else {
+                previousLetter = nil
+                continue
+            }
+            if let prev = previousLetter,
+               prev + 1 == i,
+               let prevBox = boxes[prev],
+               let box = boxes[i] {
+                let gap = axisGap(from: prevBox, to: box, horizontal: horizontal, forward: forward)
+                let width = max(
+                    axisExtent(prevBox, horizontal: horizontal),
+                    axisExtent(box, horizontal: horizontal)
+                )
+                if width > 0 {
+                    samples.append((index: i, gap: gap, width: width))
+                }
+            }
+            previousLetter = i
+        }
+
+        let tight = samples
+            .filter { $0.gap > 0 && $0.gap < $0.width * 0.35 }
+            .map { $0.gap }
+        let typical = median(tight)
+        var insertAt = Set<Int>()
+        for sample in samples {
+            guard sample.gap > 0 else { continue }
+            let clearWordGap: Bool
+            if let typical {
+                // Wider than both a normal letter gap and this line's own
+                // tight spacing, so loose tracking inside one word stays put.
+                clearWordGap = sample.gap > max(sample.width * 0.45, typical * 3)
+            } else {
+                clearWordGap = sample.gap > sample.width * 0.55
+            }
+            if clearWordGap {
+                insertAt.insert(sample.index)
+            }
+        }
+        guard !insertAt.isEmpty else { return raw }
+
+        var out = ""
+        out.reserveCapacity(raw.count + insertAt.count)
+        for i in chars.indices {
+            if insertAt.contains(i) {
+                out.append(" ")
+            }
+            out.append(chars[i])
+        }
+        return out
+    }
+
+    /// True when the line runs across the image rather than down it.
+    private static func readingIsHorizontal(_ boxes: [CGRect?]) -> Bool {
+        let known = boxes.compactMap { $0 }
+        guard let first = known.first, let last = known.last, known.count >= 2 else {
+            return true
+        }
+        return abs(last.midX - first.midX) >= abs(last.midY - first.midY)
+    }
+
+    /// True when later characters sit further along the reading axis.
+    private static func readingIsForward(_ boxes: [CGRect?], horizontal: Bool) -> Bool {
+        let known = boxes.compactMap { $0 }
+        guard let first = known.first, let last = known.last else { return true }
+        if horizontal { return last.midX >= first.midX }
+        return last.midY >= first.midY
+    }
+
+    /// Open distance from [prev] to [next] along the line.
+    private static func axisGap(
+        from prev: CGRect,
+        to next: CGRect,
+        horizontal: Bool,
+        forward: Bool
+    ) -> CGFloat {
+        if horizontal {
+            return forward ? (next.minX - prev.maxX) : (prev.minX - next.maxX)
+        }
+        return forward ? (next.minY - prev.maxY) : (prev.minY - next.maxY)
+    }
+
+    /// Glyph size along the reading axis.
+    private static func axisExtent(_ rect: CGRect, horizontal: Bool) -> CGFloat {
+        horizontal ? rect.width : rect.height
+    }
+
+    /// Middle value of [values], used as this line's typical letter gap.
+    private static func median(_ values: [CGFloat]) -> CGFloat? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 0 {
+            return (sorted[mid - 1] + sorted[mid]) / 2
+        }
+        return sorted[mid]
     }
 
     /// Claims the held barcode so only one confirmation OCR runs.
