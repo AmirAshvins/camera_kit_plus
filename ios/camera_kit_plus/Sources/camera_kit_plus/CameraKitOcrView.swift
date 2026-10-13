@@ -309,7 +309,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     }
 
     func initCamera( flashMode: Int, fill: Bool, barcodeTypeID: Int, cameraID: Int, modeID: Int) {
-        print("Usage Mode set to "+String(modeID))
+        CameraKitLog.line("Usage Mode set to "+String(modeID))
         self.usageMode = modeID
         self.isFillScale = fill
         self.cameraPosition = cameraID == 0 ? .back : .front
@@ -398,7 +398,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
             deviceInput = try AVCaptureDeviceInput(device: captureDevice)
             guard deviceInput != nil else {
-                print("error: cant get deviceInput")
+                CameraKitLog.line("error: cant get deviceInput")
                 session.commitConfiguration()
                 return
             }
@@ -450,7 +450,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                     }
                     device.unlockForConfiguration()
                 } catch {
-                    print("OCR frame-rate config error: \(error)")
+                    CameraKitLog.line("OCR frame-rate config error: \(error)")
                 }
             }
 
@@ -465,7 +465,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         } catch let error as NSError {
             deviceInput = nil
             session.commitConfiguration()
-            print("error: \(error.localizedDescription)")
+            CameraKitLog.line("error: \(error.localizedDescription)")
         }
     }
 
@@ -561,7 +561,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             }
 
         } catch {
-            print("Torch config error: \(error)")
+            CameraKitLog.line("Torch config error: \(error)")
         }
     }
 
@@ -728,10 +728,10 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                                                     withIntermediateDirectories: true)
             try data.write(to: url, options: .atomic)
             self.flutterResultTakePicture?(url.path)
-            print(url.path)
+            CameraKitLog.line(url.path)
             return true
         } catch {
-            print("saveImage error: \(error)")
+            CameraKitLog.line("saveImage error: \(error)")
             self.flutterResultTakePicture?(FlutterError(code: "-103", message: error.localizedDescription, details: nil))
             return false
         }
@@ -779,7 +779,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             let json = String(data: jsonData, encoding: .utf8)
             invokeOnMain("onTextRead", arguments: json)
         } catch {
-            print("JSON encode error: \(error)")
+            CameraKitLog.line("JSON encode error: \(error)")
         }
     }
 
@@ -819,7 +819,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                 }
             }
         } catch {
-            print("Error loading image : \(error)")
+            CameraKitLog.line("Error loading image : \(error)")
         }
     }
 
@@ -857,7 +857,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                 device.videoZoomFactor = newFactor
                 device.unlockForConfiguration()
             } catch {
-                print("Zoom lock error: \(error)")
+                CameraKitLog.line("Zoom lock error: \(error)")
             }
 
         case .ended, .cancelled, .failed:
@@ -868,7 +868,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                   invokeOnMain("onZoomChanged", arguments: target)
                 device.unlockForConfiguration()
             } catch {
-                print("Zoom end error: \(error)")
+                CameraKitLog.line("Zoom end error: \(error)")
             }
             lastZoomFactor = target
 
@@ -913,7 +913,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             }
             device.unlockForConfiguration()
         } catch {
-            print("focus error: \(error)")
+            CameraKitLog.line("focus error: \(error)")
         }
     }
 
@@ -942,7 +942,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             lastZoomFactor = clamped
         } catch {
 
-            print("setZoom error: \(error)")
+            CameraKitLog.line("setZoom error: \(error)")
         }
     }
 
@@ -1061,12 +1061,12 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
 
             device.unlockForConfiguration()
         } catch {
-            print("applyFocusConfiguration error: \(error)")
+            CameraKitLog.line("applyFocusConfiguration error: \(error)")
         }
     }
     
     private func buildMacroStatus() -> [String: Any] {
-        print("buildMacroStatus")
+        CameraKitLog.line("buildMacroStatus")
         var status: [String: Any] = [
             "requestedMacro": isMacroEnabled as Any
         ]
@@ -1101,7 +1101,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         if d.isFocusModeSupported(.continuousAutoFocus) || d.isFocusModeSupported(.autoFocus) || d.isFocusModeSupported(.locked) {
             status["lensPosition"] = d.lensPosition  // 0 = far, 1 = near (approximate)
         }
-        print(status)
+        CameraKitLog.line(status)
         return status
     }
     
@@ -1154,7 +1154,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             // Keep your existing outputs; they remain attached to the session
 
         } catch {
-            print("switchBackCamera error: \(error)")
+            CameraKitLog.line("switchBackCamera error: \(error)")
         }
     }
     
@@ -1339,7 +1339,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     ) {
         let request = VNRecognizeTextRequest { request, error in
             if let error = error {
-                print("Vision OCR error: \(error)")
+                CameraKitLog.line("Vision OCR error: \(error)")
                 completion("", [])
                 return
             }
@@ -1361,7 +1361,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             do {
                 try handler.perform([request])
             } catch {
-                print("Vision OCR perform error: \(error)")
+                CameraKitLog.line("Vision OCR perform error: \(error)")
                 completion("", [])
             }
         }
@@ -1376,7 +1376,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
     ) {
         let request = VNRecognizeTextRequest { request, error in
             if let error = error {
-                print("Vision OCR error: \(error)")
+                CameraKitLog.line("Vision OCR error: \(error)")
                 completion("", [])
                 return
             }
@@ -1394,7 +1394,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             do {
                 try handler.perform([request])
             } catch {
-                print("Vision OCR perform error: \(error)")
+                CameraKitLog.line("Vision OCR perform error: \(error)")
                 completion("", [])
             }
         }
@@ -1476,7 +1476,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
             try audio.setActive(true, options: [])
             didChangeAudioSession = true
         } catch {
-            print("AudioSession begin (mute shutter) error: \(error)")
+            CameraKitLog.line("AudioSession begin (mute shutter) error: \(error)")
             didChangeAudioSession = false
         }
     }
@@ -1494,7 +1494,7 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
                 try audio.setActive(true, options: [])
             }
         } catch {
-            print("AudioSession restore error: \(error)")
+            CameraKitLog.line("AudioSession restore error: \(error)")
         }
         didChangeAudioSession = false
     }

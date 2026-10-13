@@ -52,6 +52,10 @@ class CameraKitPlusPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Plug
     when (call.method) {
       "getPlatformVersion" -> result.success("Android ${android.os.Build.VERSION.RELEASE}")
       "getCameraPermission" -> getCameraPermission(result)
+      "setSilentLogs" -> {
+        CameraKitLog.silent = call.arguments as? Boolean ?: true
+        result.success(null)
+      }
       else -> result.notImplemented()
     }
   }

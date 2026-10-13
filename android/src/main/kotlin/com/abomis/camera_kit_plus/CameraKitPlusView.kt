@@ -11,7 +11,6 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
-import android.util.Log
 import android.util.Range
 import android.util.Size
 import android.view.GestureDetector
@@ -106,7 +105,7 @@ class CameraKitPlusView(
     }
 
     init {
-        Log.d("CameraKitPlusView", "INIT")
+        CameraKitLog.d("CameraKitPlusView", "INIT")
         linearLayout = FrameLayout(context)
         linearLayout.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         linearLayout.setBackgroundColor(Color.BLACK)
@@ -236,7 +235,7 @@ class CameraKitPlusView(
                 )
             }
         } catch (exc: Exception) {
-            Log.e("CameraX", "Use case binding failed", exc)
+            CameraKitLog.e("CameraX", "Use case binding failed", exc)
             return
         }
 
@@ -333,7 +332,7 @@ class CameraKitPlusView(
                     )
                 }
             }
-            .addOnFailureListener { Log.e("Barcode", "confirmation textAssist failed", it) }
+            .addOnFailureListener { CameraKitLog.e("Barcode", "confirmation textAssist failed", it) }
             .addOnCompleteListener { emitBarcode(barcode) }
     }
 
@@ -476,7 +475,7 @@ class CameraKitPlusView(
                 }
                 emitBarcode(barcode)
             }
-            .addOnFailureListener { Log.e("Barcode", "Failed to scan barcode", it) }
+            .addOnFailureListener { CameraKitLog.e("Barcode", "Failed to scan barcode", it) }
             .addOnCompleteListener {
                 val pending = confirmBarcode[0]
                 if (pending != null && textAssistEnabled && !didEmitBarcode && !isConfirmingBarcode) {
@@ -485,7 +484,7 @@ class CameraKitPlusView(
                     val bitmap: Bitmap? = try {
                         imageProxy.toBitmap()
                     } catch (e: Exception) {
-                        Log.e("Barcode", "confirmation bitmap failed", e)
+                        CameraKitLog.e("Barcode", "confirmation bitmap failed", e)
                         null
                     }
                     imageProxy.close()
@@ -513,7 +512,7 @@ class CameraKitPlusView(
                 val bitmap: Bitmap? = try {
                     imageProxy.toBitmap()
                 } catch (e: Exception) {
-                    Log.e("Barcode", "textAssist bitmap failed", e)
+                    CameraKitLog.e("Barcode", "textAssist bitmap failed", e)
                     null
                 }
                 imageProxy.close()
@@ -693,16 +692,16 @@ class CameraKitPlusView(
     @OptIn(ExperimentalCamera2Interop::class)
     private fun logAllAvailableCameras() {
         val provider = cameraProvider ?: return
-        Log.d("CameraDebug", "===== Available cameras (CameraX) =====")
+        CameraKitLog.d("CameraDebug", "===== Available cameras (CameraX) =====")
         provider.availableCameraInfos.forEachIndexed { index, info ->
             try {
                 val c2 = Camera2CameraInfo.from(info)
                 val facing = c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
-                Log.d("CameraDebug", "Camera #$index: ID: ${c2.cameraId}, Facing: $facing")
+                CameraKitLog.d("CameraDebug", "Camera #$index: ID: ${c2.cameraId}, Facing: $facing")
             } catch (t: Throwable) {
-                Log.w("CameraDebug", "Failed to read camera #$index: ${t.message}")
+                CameraKitLog.w("CameraDebug", "Failed to read camera #$index: ${t.message}")
             }
         }
-        Log.d("CameraDebug", "===== End camera list =====")
+        CameraKitLog.d("CameraDebug", "===== End camera list =====")
     }
 }

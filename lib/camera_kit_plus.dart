@@ -3,6 +3,7 @@ import 'camera_kit_plus_platform_interface.dart';
 export 'camera_kit_plus_view.dart';
 export 'camera_kit_ocr_plus_view.dart';
 export 'camera_kit_plus_controller.dart';
+export 'camera_kit_plus_logging.dart';
 export 'enums.dart';
 
 /// Plugin-level APIs (platform version, permission). View commands go through

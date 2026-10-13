@@ -388,12 +388,12 @@ class CameraKitPlusView: NSObject,
             if captureSession.canAddInput(videoInput) {
                 captureSession.addInput(videoInput)
             } else {
-                print("Could not add video input")
+                CameraKitLog.line("Could not add video input")
                 captureSession.commitConfiguration()
                 return
             }
         } catch {
-            print("Failed to create input: \(error)")
+            CameraKitLog.line("Failed to create input: \(error)")
             captureSession.commitConfiguration()
             return
         }
@@ -427,7 +427,7 @@ class CameraKitPlusView: NSObject,
             Self.applyScanFrameRate(on: device, fps: highScanQuality ? 24 : 15)
             device.unlockForConfiguration()
         } catch {
-            print("Device configuration error: \(error)")
+            CameraKitLog.line("Device configuration error: \(error)")
         }
 
         captureSession.commitConfiguration()
@@ -529,7 +529,7 @@ class CameraKitPlusView: NSObject,
             try d.lockForConfiguration()
             d.torchMode = mode
             d.unlockForConfiguration()
-        } catch { print("torch mode error: \(error)") }
+        } catch { CameraKitLog.line("torch mode error: \(error)") }
     }
 
     func setTorch(level: Float = 0.35) {
@@ -542,7 +542,7 @@ class CameraKitPlusView: NSObject,
                 try d.setTorchModeOn(level: min(max(level, 0.01), 1.0))
             }
             d.unlockForConfiguration()
-        } catch { print("torch level error: \(error)") }
+        } catch { CameraKitLog.line("torch level error: \(error)") }
     }
 
     func changeFlashMode(modeID: Int, result: @escaping FlutterResult) {
@@ -580,7 +580,7 @@ class CameraKitPlusView: NSObject,
                 self.channel?.invokeMethod("onMacroChanged", arguments: self.buildMacroStatus())
             }
         } catch {
-            print("applyFocusConfiguration error: \(error)")
+            CameraKitLog.line("applyFocusConfiguration error: \(error)")
         }
     }
 
@@ -639,7 +639,7 @@ class CameraKitPlusView: NSObject,
             DispatchQueue.main.async { [weak self] in
                 self?.channel?.invokeMethod("onZoomChanged", arguments: clamped)
             }
-        } catch { print("setZoom error: \(error)") }
+        } catch { CameraKitLog.line("setZoom error: \(error)") }
     }
 
     // MARK: - Camera Switching
@@ -677,7 +677,7 @@ class CameraKitPlusView: NSObject,
             applyFocusConfiguration()
             ensurePreviewLayer()
         } catch {
-            print("switchBackCamera error: \(error)")
+            CameraKitLog.line("switchBackCamera error: \(error)")
         }
     }
 
@@ -726,7 +726,7 @@ class CameraKitPlusView: NSObject,
                 try device.lockForConfiguration()
                 device.videoZoomFactor = newFactor
                 device.unlockForConfiguration()
-            } catch { print("Zoom lock error: \(error)") }
+            } catch { CameraKitLog.line("Zoom lock error: \(error)") }
         case .ended, .cancelled, .failed:
             let target = max(minZoomFactor, min(device.videoZoomFactor, maxZoomFactor))
             do {
@@ -738,7 +738,7 @@ class CameraKitPlusView: NSObject,
                 DispatchQueue.main.async { [weak self] in
                     self?.channel?.invokeMethod("onZoomChanged", arguments: target)
                 }
-            } catch { print("Zoom end error: \(error)") }
+            } catch { CameraKitLog.line("Zoom end error: \(error)") }
             lastZoomFactor = target
         default: break
         }
@@ -781,7 +781,7 @@ class CameraKitPlusView: NSObject,
             }
             device.unlockForConfiguration()
         } catch {
-            print("focus error: \(error)")
+            CameraKitLog.line("focus error: \(error)")
         }
     }
 

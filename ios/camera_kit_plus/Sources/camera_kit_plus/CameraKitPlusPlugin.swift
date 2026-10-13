@@ -22,6 +22,9 @@ public class CameraKitPlusPlugin: NSObject, FlutterPlugin {
       result("iOS " + UIDevice.current.systemVersion)
     case "getCameraPermission":
       requestCameraPermission(result: result)
+    case "setSilentLogs":
+      CameraKitLog.silent = call.arguments as? Bool ?? true
+      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }

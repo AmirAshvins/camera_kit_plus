@@ -8,7 +8,6 @@ import android.graphics.Color
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
-import android.util.Log
 import android.util.Size
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -213,7 +212,7 @@ class CameraKitOcrPlusView(
                 provider.bindToLifecycle(lifecycleOwner, it, preview, imageCapture, imageAnalysis)
             }
         } catch (exc: Exception) {
-            Log.e("CameraX", "Use case binding failed", exc)
+            CameraKitLog.e("CameraX", "Use case binding failed", exc)
             return
         }
 
@@ -325,7 +324,7 @@ class CameraKitOcrPlusView(
                     invokeOnMain("onTextRead", Gson().toJson(map))
                 }
             }
-            .addOnFailureListener { Log.e("Text", "Failed to recognize text", it) }
+            .addOnFailureListener { CameraKitLog.e("Text", "Failed to recognize text", it) }
             .addOnCompleteListener { imageProxy.close() }
     }
 
