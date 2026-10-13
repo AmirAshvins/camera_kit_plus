@@ -1296,12 +1296,15 @@ class CameraKitOcrView: NSObject, FlutterPlatformView, AVCapturePhotoCaptureDele
         let recognitionLevel: VNRequestTextRecognitionLevel =
             (liveOcrCycleIndex % 3 == 2) ? .fast : .accurate
         liveOcrCycleIndex += 1
+        // Full frame, not just the MRZ strip. A hyphen or apostrophe is printed
+        // in the visual zone and stored in the MRZ as a filler, so cropping to
+        // the bottom half turns Soheili-Jorabchi into Soheili Jorabchi.
         recognizeText(
             pixelBuffer: pixelBuffer,
             orientation: cgOrientation,
             recognitionLevel: recognitionLevel,
             bufferSize: bufferSize,
-            regionOfInterest: CGRect(x: 0, y: 0, width: 1, height: 0.5)
+            regionOfInterest: CGRect(x: 0, y: 0, width: 1, height: 1)
         ) { [weak self] text, lines in
             guard let self = self else { return }
             self.isProcessingOcr = false
