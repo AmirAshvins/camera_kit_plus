@@ -93,7 +93,14 @@ class CameraKitPlusController extends CameraKitPlus {
   Future<T?> _invoke<T>(String method, [Map<String, dynamic>? args]) async {
     final channel = _viewChannel;
     if (channel == null) return null;
-    return channel.invokeMethod<T>(method, args);
+    try {
+      return await channel.invokeMethod<T>(method, args);
+    } on MissingPluginException {
+      // The platform view was destroyed (scan-mode switch or hot reload)
+      // while this controller still held the channel. The call cannot be
+      // delivered; callers treat null as a failed no-op.
+      return null;
+    }
   }
 
   /// Pauses native capture.
@@ -117,7 +124,8 @@ class CameraKitPlusController extends CameraKitPlus {
   }
 
   Future<bool> changeFlashMode(CameraKitPlusFlashMode mode) async {
-    return await _invoke<bool>('changeFlashMode', {'flashModeID': mode.index}) ??
+    return await _invoke<bool>(
+            'changeFlashMode', {'flashModeID': mode.index}) ??
         false;
   }
 
@@ -169,10 +177,26 @@ class CameraKitPlusController extends CameraKitPlus {
 
   /// Asks the native view to release capture resources, then [unbind]s.
   ///
-  /// Safe to call when unbound (no-ops the invoke, still clears handlers).
+  /// Safe to call when unbound, and when the platform view is already gone.
+  /// A missing native handler still clears the Dart channel so a later mode
+  /// can bind a new view.
+  ///
+  /// The channel is snapshotted first. A scan-mode switch can [bindToView]
+  /// a replacement while this dispose is still awaiting the old native view.
+  /// That newer binding is left alone.
   Future<void> disposeView() async {
-    _hostPaused = false;
-    await _invoke<bool>('dispose');
-    unbind();
+    final int? viewId = _boundViewId;
+    final MethodChannel? channel = _viewChannel;
+    if (channel == null || viewId == null) return;
+    try {
+      await channel.invokeMethod<bool>('dispose');
+    } on MissingPluginException {
+      // Platform view already destroyed (mode switch or hot reload).
+    } finally {
+      if (_boundViewId == viewId) {
+        _hostPaused = false;
+        unbind();
+      }
+    }
   }
 }

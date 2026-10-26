@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:camera_kit_plus/camera_kit_plus_controller.dart'
     show
         CameraKitPlusController,
@@ -98,6 +100,34 @@ void main() {
       expect(controller.isBound, isFalse);
       // Further pause after dispose must no-op (channel cleared).
       expect(await controller.pauseCamera(), isFalse);
+    });
+
+    test('disposeView unbinds when the native view is already gone', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(viewChannel, null);
+      await controller.disposeView();
+      expect(controller.isBound, isFalse);
+    });
+
+    test('disposeView leaves a newer binding in place', () async {
+      final gate = Completer<void>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(viewChannel, (call) async {
+        if (call.method == 'dispose') await gate.future;
+        return true;
+      });
+      final pending = controller.disposeView();
+      const newer = MethodChannel('camera_kit_plus/view_8');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(newer, (call) async => true);
+      controller.bindToView(8);
+      gate.complete();
+      await pending;
+      expect(controller.isBound, isTrue);
+      expect(controller.boundViewId, 8);
+      controller.unbind();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(newer, null);
     });
 
     test('late platform-view create after widget dispose stops native capture',

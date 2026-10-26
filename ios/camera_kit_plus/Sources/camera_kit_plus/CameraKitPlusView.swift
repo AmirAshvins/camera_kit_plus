@@ -71,6 +71,8 @@ class CameraKitPlusView: NSObject,
     private var highScanQuality = false
     /// Gated printed-text OCR for Find/Search overlay chips (not Board).
     private var textAssistEnabled = false
+    /// Itinerary uses accurate live OCR. Boarding-pass chips stay on `.fast`.
+    private var textAssistAccurate = false
     private var sessionStartedAt: CFAbsoluteTime = 0
     private var lastTextAssistTs: CFAbsoluteTime = 0
     private var didEmitBarcode = false
@@ -129,6 +131,9 @@ class CameraKitPlusView: NSObject,
             }
             if let assist = myArgs["textAssist"] as? Bool {
                 self.textAssistEnabled = assist
+            }
+            if let accurate = myArgs["textAssistAccurate"] as? Bool {
+                self.textAssistAccurate = accurate
             }
             // Host ROI wins over the 60%×40% default and the high-quality
             // frame, so a small modal well can scan the area the agent sees.
@@ -965,7 +970,7 @@ class CameraKitPlusView: NSObject,
                 self.channel?.invokeMethod("onTextAssist", arguments: text)
             }
         }
-        request.recognitionLevel = .fast
+        request.recognitionLevel = self.textAssistAccurate ? .accurate : .fast
         request.usesLanguageCorrection = false
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
         DispatchQueue.global(qos: .utility).async {

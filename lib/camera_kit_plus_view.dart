@@ -48,6 +48,12 @@ class CameraKitPlusView extends StatefulWidget {
   /// When true, native runs gated printed-text OCR for overlay chips.
   final bool textAssist;
 
+  /// When true with [textAssist], live OCR uses accurate recognition.
+  ///
+  /// Itinerary pages need it. Boarding-pass overlay chips stay on the fast
+  /// pass so PDF417 scanning is not stalled.
+  final bool textAssistAccurate;
+
   /// Called with raw OCR text from [textAssist] (not a barcode).
   final void Function(String text)? onTextAssist;
 
@@ -72,6 +78,7 @@ class CameraKitPlusView extends StatefulWidget {
     this.roiWidth,
     this.roiHeight,
     this.textAssist = false,
+    this.textAssistAccurate = false,
     this.onTextAssist,
     this.onConfirmationText,
   });
@@ -157,6 +164,7 @@ class _CameraKitPlusViewState extends State<CameraKitPlusView>
       if (widget.roiWidth != null) 'roiWidth': widget.roiWidth,
       if (widget.roiHeight != null) 'roiHeight': widget.roiHeight,
       'textAssist': widget.textAssist,
+      'textAssistAccurate': widget.textAssistAccurate,
     };
 
     switch (defaultTargetPlatform) {
