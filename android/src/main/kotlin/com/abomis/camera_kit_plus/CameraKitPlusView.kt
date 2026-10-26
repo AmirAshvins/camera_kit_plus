@@ -324,8 +324,8 @@ class CameraKitPlusView(
             .addOnSuccessListener { result ->
                 val content = printedLines(result)
                 if (content.isNotEmpty() && !didEmitBarcode) {
-                    // This frame decides name spaces. A fast read must not
-                    // outvote a one-word confirmation line.
+                    // Extra evidence for the printed name. A one-word line
+                    // does not cancel a space an earlier frame already showed.
                     invokeOnMain(
                         "onTextAssist",
                         mapOf("text" to content, "confirmation" to true),

@@ -983,8 +983,8 @@ class CameraKitPlusView: NSObject,
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if !text.isEmpty {
-                    // This frame decides name spaces. Earlier fast reads must
-                    // not outvote a one-word confirmation line.
+                    // Extra evidence for the printed name. A one-word line
+                    // does not cancel a space an earlier frame already showed.
                     self.channel?.invokeMethod(
                         "onTextAssist",
                         arguments: ["text": text, "confirmation": true]
@@ -1019,8 +1019,12 @@ class CameraKitPlusView: NSObject,
     ///
     /// Language correction is off so `T'EST` is not rewritten as `TEST`. That
     /// also drops the space in an all-caps name, so `PY PEEWEE` can arrive as
-    /// `PYPEEWEE`. A gap is a word space only when it is clearly wider than
-    /// the gaps inside the same line. An existing space is left as printed.
+    /// `PYPEEWEE`. A boarding-pass word space is often a bit under half a
+    /// glyph and under three times the letter gap, and that ratio moves from
+    /// frame to frame. A gap counts when it is wider than both a quarter of
+    /// the glyph and twice this line's own tight spacing. An even word has
+    /// no outlier, so `MARYJANE` stays one token. An existing space is left
+    /// as printed.
     private static func linePreservingWordGaps(_ candidate: VNRecognizedText) -> String {
         let raw = candidate.string
         guard raw.count >= 2 else { return raw }
@@ -1071,11 +1075,12 @@ class CameraKitPlusView: NSObject,
             guard sample.gap > 0 else { continue }
             let clearWordGap: Bool
             if let typical {
-                // Wider than both a normal letter gap and this line's own
-                // tight spacing, so loose tracking inside one word stays put.
-                clearWordGap = sample.gap > max(sample.width * 0.45, typical * 3)
+                // Twice this line's own letter gap, and at least a quarter of
+                // a glyph. The old 3× / 0.45em gate missed the same word space
+                // on the next frame when the measured ratio jittered.
+                clearWordGap = sample.gap > max(sample.width * 0.25, typical * 2)
             } else {
-                clearWordGap = sample.gap > sample.width * 0.55
+                clearWordGap = sample.gap > sample.width * 0.32
             }
             if clearWordGap {
                 insertAt.insert(sample.index)
