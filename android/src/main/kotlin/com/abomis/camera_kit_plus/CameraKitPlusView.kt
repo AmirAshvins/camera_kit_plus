@@ -271,12 +271,22 @@ class CameraKitPlusView(
                 Barcode.FORMAT_QR_CODE,
             )
         } else {
+            // Same set as Dart kBagTagBarcodeTypes so swing tags (ITF) and
+            // other airline formats reach onBarcodeDataScanned.
             options.setBarcodeFormats(
-                Barcode.FORMAT_PDF417,
-                Barcode.FORMAT_QR_CODE,
-                Barcode.FORMAT_AZTEC,
-                Barcode.FORMAT_DATA_MATRIX,
                 Barcode.FORMAT_CODE_128,
+                Barcode.FORMAT_CODE_39,
+                Barcode.FORMAT_CODE_93,
+                Barcode.FORMAT_ITF,
+                Barcode.FORMAT_CODABAR,
+                Barcode.FORMAT_EAN_13,
+                Barcode.FORMAT_EAN_8,
+                Barcode.FORMAT_UPC_A,
+                Barcode.FORMAT_UPC_E,
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_PDF417,
+                Barcode.FORMAT_DATA_MATRIX,
+                Barcode.FORMAT_AZTEC,
             )
         }
         barcodeScanner = BarcodeScanning.getClient(options.build())

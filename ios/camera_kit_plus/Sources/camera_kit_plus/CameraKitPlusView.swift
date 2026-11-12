@@ -69,14 +69,18 @@ class CameraKitPlusView: NSObject,
     private var roiHeightPercent: CGFloat = 0.4
     /// 1080p / 24 fps for PDF417 BCBP; 720p / 15 fps otherwise.
     private var highScanQuality = false
+    /// Vision barcode pass for bag-tag sessions. Off for Board PDF417 heat.
+    private var bagTagVisionEnabled = true
     /// Gated printed-text OCR for Find/Search overlay chips (not Board).
     private var textAssistEnabled = false
     /// Itinerary uses accurate live OCR. Boarding-pass chips stay on `.fast`.
     private var textAssistAccurate = false
     private var sessionStartedAt: CFAbsoluteTime = 0
     private var lastTextAssistTs: CFAbsoluteTime = 0
+    private var lastVisionBarcodeTs: CFAbsoluteTime = 0
     private var didEmitBarcode = false
     private var isProcessingTextAssist = false
+    private var isProcessingVisionBarcode = false
     /// First barcode, held until one accurate OCR pass can read printed punctuation.
     private var pendingConfirmation: PendingBarcodeRead?
     /// True while that confirmation OCR request is in flight.
@@ -128,6 +132,13 @@ class CameraKitPlusView: NSObject,
                 self.roiWidthPercent = 0.90
                 self.roiHeightPercent = 0.55
                 self.wantedAVTypes = [.pdf417, .qr]
+                // Board stays on AVMetadata only — Vision barcode heated the NPU.
+                self.bagTagVisionEnabled = false
+            } else {
+                // Codabar is in kBagTagBarcodeTypes; AVFoundation added it later.
+                if #available(iOS 15.4, *) {
+                    self.wantedAVTypes.append(.codabar)
+                }
             }
             if let assist = myArgs["textAssist"] as? Bool {
                 self.textAssistEnabled = assist
@@ -408,21 +419,25 @@ class CameraKitPlusView: NSObject,
             captureSession.addOutput(metadataOutput)
             metadataOutput.setMetadataObjectsDelegate(self,
                  queue: DispatchQueue(label: "metadata.queue", qos: .userInitiated))
-            metadataOutput.metadataObjectTypes = wantedAVTypes
+            // One unsupported type throws and leaves the output detecting nothing.
+            let available = Set(metadataOutput.availableMetadataObjectTypes)
+            let filtered = wantedAVTypes.filter { available.contains($0) }
+            metadataOutput.metadataObjectTypes = filtered.isEmpty
+                ? Array(available)
+                : filtered
             self.metadataOutputRef = metadataOutput
         }
 
-        if textAssistEnabled {
+        // Text-assist OCR and bag-tag Vision share one video output. Board
+        // (highScanQuality) skips both so the NPU stays cool on PDF417.
+        if textAssistEnabled || bagTagVisionEnabled {
             let videoOut = AVCaptureVideoDataOutput()
             videoOut.alwaysDiscardsLateVideoFrames = true
-            videoOut.setSampleBufferDelegate(self, queue: DispatchQueue(label: "camera_kit_plus.textAssist"))
+            videoOut.setSampleBufferDelegate(self, queue: DispatchQueue(label: "camera_kit_plus.videoAssist"))
             if captureSession.canAddOutput(videoOut) {
                 captureSession.addOutput(videoOut)
             }
         }
-
-        // Hardware AVMetadata is enough for BCBP/QR. A second Vision barcode
-        // pass on video frames was the main NPU heat on Board.
 
         do {
             try device.lockForConfiguration()
@@ -954,11 +969,23 @@ class CameraKitPlusView: NSObject,
             return
         }
 
-        guard textAssistEnabled, !didEmitBarcode, !isConfirmingBarcode, !isProcessingTextAssist else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let now = CFAbsoluteTimeGetCurrent()
+
+        // Bag-tag / bag-drop: AVMetadata misses ITF swing tags. One Vision
+        // request covers every symbology the dialog already accepts.
+        if bagTagVisionEnabled,
+           !didEmitBarcode,
+           !isProcessingVisionBarcode,
+           now - sessionStartedAt >= 0.3,
+           now - lastVisionBarcodeTs >= 0.25 {
+            lastVisionBarcodeTs = now
+            detectBagTagBarcode(in: pixelBuffer)
+        }
+
+        guard textAssistEnabled, !didEmitBarcode, !isConfirmingBarcode, !isProcessingTextAssist else { return }
         guard now - sessionStartedAt >= 0.4 else { return }
         guard now - lastTextAssistTs >= 0.33 else { return }
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastTextAssistTs = now
         isProcessingTextAssist = true
         let request = VNRecognizeTextRequest { [weak self] request, _ in
@@ -976,6 +1003,96 @@ class CameraKitPlusView: NSObject,
         DispatchQueue.global(qos: .utility).async {
             try? handler.perform([request])
         }
+    }
+
+    /// Throttled Vision barcode pass for swing tags and other bag-tag formats.
+    ///
+    /// Stops after the first emit. Symbologies match Dart `kBagTagBarcodeTypes`,
+    /// filtered to what this OS reports in `supportedSymbologies`.
+    private func detectBagTagBarcode(in pixelBuffer: CVPixelBuffer) {
+        isProcessingVisionBarcode = true
+        let request = VNDetectBarcodesRequest { [weak self] request, _ in
+            defer { self?.isProcessingVisionBarcode = false }
+            guard let self = self, !self.didEmitBarcode else { return }
+            guard let observations = request.results as? [VNBarcodeObservation] else { return }
+            for observation in observations {
+                guard let value = observation.payloadStringValue, !value.isEmpty else { continue }
+                let typeCode = Self.intBarcodeCode(forVision: observation.symbology)
+                let points = Self.cornerPoints(from: observation)
+                self.emitBarcodeIfNew(value: value, typeCode: typeCode, cornerPoints: points)
+                return
+            }
+        }
+        // supportedSymbologies is iOS 15+. Older builds get the wanted list as-is;
+        // Vision ignores names the OS cannot decode.
+        if #available(iOS 15.0, *) {
+            let supported = Set(VNDetectBarcodesRequest.supportedSymbologies)
+            let filtered = Self.bagTagVisionSymbologies.filter { supported.contains($0) }
+            if !filtered.isEmpty {
+                request.symbologies = filtered
+            }
+        } else {
+            request.symbologies = Self.bagTagVisionSymbologies
+        }
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? handler.perform([request])
+        }
+    }
+
+    /// Vision names for every format in Dart `kBagTagBarcodeTypes`.
+    private static var bagTagVisionSymbologies: [VNBarcodeSymbology] {
+        var list: [VNBarcodeSymbology] = [
+            .i2of5,
+            .code128,
+            .code39,
+            .code93,
+            .qr,
+            .pdf417,
+            .dataMatrix,
+            .aztec,
+            .ean13,
+            .ean8,
+            .itf14,
+            .upce,
+        ]
+        if #available(iOS 15.0, *) {
+            list.append(.codabar)
+        }
+        return list
+    }
+
+    /// Maps a Vision symbology to the same integer codes as Dart `BarcodeType`.
+    private static func intBarcodeCode(forVision symbology: VNBarcodeSymbology) -> Int {
+        switch symbology {
+        case .code128: return 1
+        case .code39, .code39Checksum, .code39FullASCII, .code39FullASCIIChecksum: return 2
+        case .code93, .code93i: return 4
+        case .dataMatrix: return 16
+        case .ean13: return 32
+        case .ean8: return 64
+        case .i2of5, .i2of5Checksum, .itf14: return 128
+        case .qr: return 256
+        case .upce: return 1024
+        case .pdf417: return 2048
+        case .aztec: return 4096
+        default:
+            if #available(iOS 15.0, *), symbology == .codabar {
+                return 8
+            }
+            return 0
+        }
+    }
+
+    /// Four corners of a Vision barcode observation in image space.
+    private static func cornerPoints(from observation: VNBarcodeObservation) -> [CKPPoint] {
+        let box = observation.boundingBox
+        return [
+            CKPPoint(x: box.minX, y: box.minY),
+            CKPPoint(x: box.maxX, y: box.minY),
+            CKPPoint(x: box.maxX, y: box.maxY),
+            CKPPoint(x: box.minX, y: box.maxY),
+        ]
     }
 
     /// Accurate OCR of the frame that contained the barcode, then the barcode itself.
@@ -1196,7 +1313,11 @@ class CameraKitPlusView: NSObject,
         case .itf14:                return 128
         case .pdf417:               return 2048
         case .qr:                   return 256
-        default:                    return 0
+        default:
+            if #available(iOS 15.4, *), type == .codabar {
+                return 8
+            }
+            return 0
         }
     }
 }
